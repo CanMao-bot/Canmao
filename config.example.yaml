@@ -1,0 +1,109 @@
+bot:
+  name: "罐头喵"      # bot 显示名
+  master_id: "YOUR_QQ_ID"   # 主人QQ(最高权限)
+  admin_ids: []          # 额外管理员
+  prefix: "/"
+  long_message_forward: true     # 长消息用合并转发发送
+  long_message_threshold: 200    # 超过此字符数(约200汉字即霸屏)使用合并转发
+
+onebot:
+  ws_url: "ws://127.0.0.1:3001"
+  token: "YOUR_ONE_BOT_TOKEN"
+  self_id: "YOUR_BOT_QQ_ID"
+
+data:
+  dir: "./data"
+  file_retention_days: 7    # 缓存文件保留天数, 0=不自动清理
+
+ai:
+  # 以下三项作为"初始默认提供商"在首次启动时导入 data/providers.json,
+  # 之后可在 QQ 中通过 /provider add 动态添加/切换多个提供商, 无需改配置文件。
+  base_url: "https://api.deepseek.com/v1"   # OpenAI 兼容接口
+  api_key: "YOUR_API_KEY"  # 你的 API Key
+  model: "deepseek-chat"
+  system_prompt: |
+    你是一个运行在 QQ 群里的智能助手, 名字叫 罐头喵。
+    回答要简洁、友好, 使用中文。
+    你可以使用提供的工具来帮助用户, 但不要滥用。
+
+    工作方式:
+    1. 当用户请求的信息不完整时, 使用 ask_user 工具一次性提出所有需要确认的问题, 等用户统一回答后再继续。
+    2. 调用工具执行具体操作。涉及发送消息、修改数据等操作会经过人工审核, 无需你额外询问。
+    3. 回答要直接给出结果, 不要长篇解释过程。
+  max_tokens: 2048
+  temperature: 0.7
+  timeout: 120
+  default_on: false
+  max_history: 20         # 每个会话保留的历史消息数
+  session_mode: merged    # 群会话模式: merged=全群合并 / separate=按用户独立
+  mention_only: false
+  reply_probability: 0
+  context_window: 65536
+  compact_token: 0
+  max_iterations: 200     # Agent 工具调用最大轮数
+  tool_result_max: 3000   # 工具结果最大字符数(超出截断)
+
+memory:
+  enabled: true                       # 记忆机制开关
+  embed_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 向量化 API
+  embed_api_key: "YOUR_DASHSCOPE_API_KEY"
+  embed_model: "text-embedding-v4"    # 向量模型
+  recall_limit: 5
+  vision_model: "qwen3.6-flash"       # 识图转述模型
+
+mood:
+  enabled: true
+  proactive: true     # 主动回复开关(每N条群消息后按心情决定是否搭话)
+  every_n: 10
+  remember_tool: true # 给 AI 主动记忆工具(remember)
+
+persona:
+  enabled: true
+  base: |
+    你是一个叫 罐头喵 的智能助手, 性格友善、幽默、有耐心。
+    你说话简洁自然, 偶尔带点轻松的语气, 但不会过度卖萌。
+    你乐于助人, 善于倾听, 尊重每位用户。
+  self_improve: true  # 自我优化: 从对话中学习用户偏好调整人设
+  improve_every: 20
+
+web:
+  enabled: true                       # Web 搜索/爬取/浏览器能力
+  proxy: ""                           # 访问国外网站走代理, 例: http://127.0.0.1:7890
+  browser_path: "./scripts/browser.py" # Playwright 脚本路径
+
+sched:
+  enabled: true        # 定时任务服务
+  schedule_tool: true
+
+media:
+  enabled: true                              # 图像生成/TTS
+  base_url: "https://dashscope.aliyuncs.com" # DashScope API
+  api_key: "YOUR_DASHSCOPE_API_KEY"
+  image_model: "qwen-image-2.0"          # 图像生成模型(同步接口)
+  tts_endpoint: "qwen3-tts-flash"            # TTS 模型
+  voice: "Bella"                            # 默认音色
+
+acp:
+  enabled: true         # 调用 opencode 干活
+  binary: "opencode"    # opencode 二进制(可用绝对路径)
+  cwd: "./"             # 默认工作目录
+  tool: true            # 给 AI 提供 opencode_task 工具
+  timeout: 300          # 单任务超时秒
+
+mcp:
+  servers:
+    - name: filesystem
+      transport: stdio
+      command: "npx"
+      args:
+        - "-y"
+        - "@modelcontextprotocol/server-filesystem"
+        - "/root"
+      env: []
+      enabled: false
+
+skills:
+  dir: "./skills"
+
+plugin:
+  dir: "./plugins"
