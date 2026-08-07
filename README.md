@@ -7,6 +7,8 @@
 内建完整的 AI Agent 能力，开箱即用。
 
 > 注：早期叫 `gobot`，模块名/构建产物仍沿用 `gobot`，显示名是「罐头喵」。
+>
+> 🌐 **官网与文档**：<https://canmao-bot.github.io/Canmao-site/>
 
 ---
 
