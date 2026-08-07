@@ -37,7 +37,7 @@ func (f *fakeSender) SendPrivateMsg(uid int64, msg []core.Segment) error    { re
 func newTestManager(t *testing.T) (*Manager, *core.Bot, *perm.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	bot := core.NewBot(&core.Config{Bot: core.BotConfig{MasterID: "3436464181"}})
+	bot := core.NewBot(&core.Config{Bot: core.BotConfig{MasterID: "1000001"}})
 	bot.SetSender(&fakeSender{})
 	pst, err := perm.New(dir)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestDisabledGroupSilence(t *testing.T) {
 	}
 	// 主人例外
 	ev2 := &core.Event{
-		Type: "message", DetailType: "group", GroupID: 123, UserID: 3436464181,
+		Type: "message", DetailType: "group", GroupID: 123, UserID: 1000001,
 		Message: []core.Segment{{Type: "text", Data: map[string]interface{}{"text": "/files"}}},
 	}
 	m.Handle(context.Background(), bot, ev2)
@@ -128,7 +128,7 @@ func TestResolvePath(t *testing.T) {
 
 func TestCleanupRetention(t *testing.T) {
 	dir := t.TempDir()
-	bot := core.NewBot(&core.Config{Bot: core.BotConfig{MasterID: "3436464181"}})
+	bot := core.NewBot(&core.Config{Bot: core.BotConfig{MasterID: "1000001"}})
 	bot.SetSender(&fakeSender{})
 	pst, _ := perm.New(dir)
 	defer pst.Close()

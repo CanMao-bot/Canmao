@@ -63,7 +63,7 @@ func TestGroupAdminBridge(t *testing.T) {
 	defer permS.Close()
 
 	gac := &fakeGAC{}
-	bot := core.NewBot(&core.Config{Bot: core.BotConfig{MasterID: "3436464181"}})
+	bot := core.NewBot(&core.Config{Bot: core.BotConfig{MasterID: "1000001"}})
 	bot.SetSender(&fakeSenderT{})
 
 	svc := &Service{bot: bot, gac: gac, permS: permS}
@@ -93,7 +93,7 @@ func TestGroupAdminBridge(t *testing.T) {
 	}
 
 	// 权限判断
-	if !svc.IsMaster(3436464181) {
+	if !svc.IsMaster(1000001) {
 		t.Fatal("主人判断失败")
 	}
 	if svc.IsMaster(999) {
