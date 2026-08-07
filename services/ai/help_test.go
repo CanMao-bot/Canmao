@@ -55,7 +55,7 @@ func TestRenderHelpLevels(t *testing.T) {
 func TestLevelOf(t *testing.T) {
 	dir := t.TempDir()
 	bot := core.NewBot(&core.Config{
-		Bot: core.BotConfig{MasterID: "3436464181"},
+		Bot: core.BotConfig{MasterID: "1000001"},
 		AI:  core.AIConfig{},
 	})
 	// perm store 需要真实初始化
@@ -63,7 +63,7 @@ func TestLevelOf(t *testing.T) {
 	defer pst.Close()
 	svc := &Service{perm: pst, bot: bot}
 
-	masterEv := &core.Event{Type: "message", UserID: 3436464181, DetailType: "private"}
+	masterEv := &core.Event{Type: "message", UserID: 1000001, DetailType: "private"}
 	if lvl := svc.levelOf(bot, masterEv, true); lvl != levelMaster {
 		t.Fatalf("主人级别 = %v, want levelMaster", lvl)
 	}

@@ -35,7 +35,7 @@
 - `bot.master_id` 最高权限；`onebot.ws_url` / `token` / `self_id` 连 NapCat WS。本地部署请复制为 `config.yaml` 并填入真实值，**config.yaml 不提交**。
 - `ai.*` 为初始默认 provider；运行期可用 `/provider` 命令动态增删/切换（存 `data/providers.json`）。
 - `memory`、`mood`、`persona`、`web`、`sched`、`media`、`acp`、`mcp`、`skills`、`plugin` 均为对应功能开关。
-- `web.proxy` 指向 mihomo `http://127.0.0.1:7890`（国内访问国外网站必须）。
+- `web.proxy` 指向 HTTP/SOCKS5 代理（外网受限环境访问国外网站需要，个人环境自行配置）。
 
 ## 关键约定与踏坑
 
