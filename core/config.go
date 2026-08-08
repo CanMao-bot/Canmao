@@ -185,7 +185,7 @@ func (c *Config) applyDefaults() {
 		c.AI.Timeout = 120
 	}
 	if c.AI.MaxHistory <= 0 {
-		c.AI.MaxHistory = 20
+		c.AI.MaxHistory = 200
 	}
 	if c.AI.SessionMode == "" {
 		c.AI.SessionMode = "merged"

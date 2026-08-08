@@ -97,17 +97,17 @@ func TestCompactThreshold(t *testing.T) {
 	if svc.compactThreshold() != 9999 {
 		t.Fatalf("compactThreshold = %d, want 9999", svc.compactThreshold())
 	}
-	// 未显式配置 CompactToken 时按上下文窗口的 40%
+	// 未显式配置 CompactToken 时按上下文窗口的 95%
 	cfg2 := coreCfgDefault() // MaxTokens=2048, ContextWindow=0 -> 默认 64000
 	svc2 := &Service{cfg: cfg2, models: NewModelRegistry(&cfg2.AI)}
-	if svc2.compactThreshold() != 25600 {
-		t.Fatalf("compactThreshold = %d, want 25600 (64000*40%%)", svc2.compactThreshold())
+	if svc2.compactThreshold() != 60800 {
+		t.Fatalf("compactThreshold = %d, want 60800 (64000*95%%)", svc2.compactThreshold())
 	}
 	// 显式上下文窗口
 	cfg3 := &core.Config{AI: core.AIConfig{ContextWindow: 128000}}
 	svc3 := &Service{cfg: cfg3, models: NewModelRegistry(&cfg3.AI)}
-	if svc3.compactThreshold() != 51200 {
-		t.Fatalf("compactThreshold = %d, want 51200 (128000*40%%)", svc3.compactThreshold())
+	if svc3.compactThreshold() != 121600 {
+		t.Fatalf("compactThreshold = %d, want 121600 (128000*95%%)", svc3.compactThreshold())
 	}
 	// 切换到已知模型自动更新上下文窗口
 	cfg4 := &core.Config{AI: core.AIConfig{ContextWindow: 64000}}

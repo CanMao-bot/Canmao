@@ -34,12 +34,12 @@ ai:
   temperature: 0.7
   timeout: 120
   default_on: false
-  max_history: 20         # 每个会话保留的历史消息数
+  max_history: 200        # 每个会话保留的历史消息数
   session_mode: merged    # 群会话模式: merged=全群合并 / separate=按用户独立
   mention_only: false
   reply_probability: 0
-  context_window: 65536
-  compact_token: 0
+  context_window: 65536   # 模型上下文窗口(token), 压缩阈值取此值的 95%
+  compact_token: 0        # 显式指定压缩阈值(优先级高于 context_window), 0=自动
   max_iterations: 200     # Agent 工具调用最大轮数
   tool_result_max: 3000   # 工具结果最大字符数(超出截断)
 

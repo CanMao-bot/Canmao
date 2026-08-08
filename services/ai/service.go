@@ -388,11 +388,8 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 		}
 	}
 
-	messages := s.buildContextMessages(ses)
-	// 注入记忆上下文
-	if memText != "" {
-		messages = append(messages, NewTextMessage("system", "[相关记忆]\n"+memText))
-	}
+	// 记忆注入已移入 buildContextMessages(system prompt/摘要之后、历史消息之前)
+	messages := s.buildContextMessages(ses, memText)
 	if len(imageDataURLs) > 0 {
 		// 图片已转述为文字, 主模型不再接收 base64(避免 token 开销)
 		messages = append(messages, NewTextMessage("user", userContent))
