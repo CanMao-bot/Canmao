@@ -196,6 +196,43 @@ func (o *OneBot) SendGroupMsgRaw(groupID int64, msg []core.Segment) error {
 	return err
 }
 
+// GetMsg 按消息 ID 获取消息详情 (get_msg)
+func (o *OneBot) GetMsg(messageID int64) (*core.MessageInfo, error) {
+	cr, err := o.Call("get_msg", map[string]interface{}{"message_id": messageID})
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		MessageID  int64 `json:"message_id"`
+		Time       int64 `json:"time"`
+		RawMessage string `json:"raw_message"`
+		Message    json.RawMessage `json:"message"`
+		Sender     struct {
+			UserID   int64  `json:"user_id"`
+			Nickname string `json:"nickname"`
+		} `json:"sender"`
+	}
+	if err := json.Unmarshal(cr.Data, &data); err != nil {
+		return nil, err
+	}
+	info := &core.MessageInfo{
+		MessageID:  data.MessageID,
+		UserID:     data.Sender.UserID,
+		Nickname:   data.Sender.Nickname,
+		Time:       data.Time,
+		RawMessage: data.RawMessage,
+	}
+	// message 可能是消息段数组, 也可能是字符串; 失败时退化用 raw_message 构造 text 段
+	if len(data.Message) > 0 {
+		if err := json.Unmarshal(data.Message, &info.Message); err != nil {
+			info.Message = []core.Segment{core.TextSegment(data.RawMessage)}
+		}
+	} else if data.RawMessage != "" {
+		info.Message = []core.Segment{core.TextSegment(data.RawMessage)}
+	}
+	return info, nil
+}
+
 // ---- 文件/图片 API ----
 
 // GetImage 获取图片信息(url/file/path)
@@ -369,11 +406,50 @@ func (o *OneBot) GetGroupMemberList(groupID int64) ([]map[string]interface{}, er
 	return list, nil
 }
 
+// GetGroupInfo 获取群信息(群名/人数等)
+func (o *OneBot) GetGroupInfo(groupID int64) (map[string]interface{}, error) {
+	cr, err := o.Call("get_group_info", map[string]interface{}{"group_id": groupID})
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(cr.Data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // GetGroupMemberInfo 获取群成员信息
 func (o *OneBot) GetGroupMemberInfo(groupID, userID int64) (map[string]interface{}, error) {
 	cr, err := o.Call("get_group_member_info", map[string]interface{}{
 		"group_id": groupID, "user_id": userID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(cr.Data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// ---- 入群申请 API ----
+
+// SetGroupAddRequest 审批入群申请(sub_type=add)
+func (o *OneBot) SetGroupAddRequest(flag string, approve bool, reason string) error {
+	_, err := o.Call("set_group_add_request", map[string]interface{}{
+		"flag":     flag,
+		"sub_type": "add",
+		"approve":  approve,
+		"reason":   reason,
+	})
+	return err
+}
+
+// GetStrangerInfo 获取陌生人信息(nickname 等)
+func (o *OneBot) GetStrangerInfo(userID int64) (map[string]interface{}, error) {
+	cr, err := o.Call("get_stranger_info", map[string]interface{}{"user_id": userID})
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,12 @@ type Config struct {
 	MCP    MCPConfig    `yaml:"mcp"`
 	Skills SkillsConfig `yaml:"skills"`
 	Plugin PluginConfig `yaml:"plugin"`
+	GroupReq GroupReqConfig `yaml:"group_request"`
+}
+
+// GroupReqConfig 入群申请管理配置
+type GroupReqConfig struct {
+	Enabled bool `yaml:"enabled"` // 入群申请管理开关(bot 是群管理时生效)
 }
 
 // ACPConfig 调用 opencode 等 ACP agent 干活

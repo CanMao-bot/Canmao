@@ -15,6 +15,7 @@ import (
 	"gobot/services/acp"
 	"gobot/services/dashscope"
 	"gobot/services/file"
+	"gobot/services/groupreq"
 	"gobot/services/mcp"
 	"gobot/services/memory"
 	"gobot/services/plugin"
@@ -229,6 +230,11 @@ func main() {
 	// 文件管理服务 (自动保存收到的图片/文件, 提供上传能力)
 	fileMgr := file.New(cfg.Data.Dir, bot, ws, permStore, cfg.Data.FileRetentionDays)
 	bot.RegisterService(fileMgr)
+
+	// 入群申请管理 (bot 是群管理时把申请发卡到群里, 群内命令审批)
+	if cfg.GroupReq.Enabled {
+		bot.RegisterService(groupreq.New(bot, permStore))
+	}
 
 	// 加载 MCP
 	mcpMgr := mcp.New(&cfg.MCP)

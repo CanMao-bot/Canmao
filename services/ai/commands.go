@@ -69,7 +69,7 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 			bot.Reply(ev, "用法: /bot on 或 /bot off")
 			return true, true
 		}
-		bot.Reply(ev, "无权限")
+		// 无权限的普通成员静默处理, 不在群里刷权限提示
 		return true, true
 	case "/ai":
 		role, _ := s.perm.GetGroupRole(ev.GroupID, ev.UserID)
@@ -79,17 +79,15 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 			if canAdmin {
 				s.perm.SetGroupAI(ev.GroupID, true)
 				bot.Reply(ev, "已开启本群 AI 功能")
-			} else {
-				bot.Reply(ev, "无权限")
 			}
+			// 无权限静默
 			return true, true
 		case "off", "关":
 			if canAdmin {
 				s.perm.SetGroupAI(ev.GroupID, false)
 				bot.Reply(ev, "已关闭本群 AI 功能")
-			} else {
-				bot.Reply(ev, "无权限")
 			}
+			// 无权限静默
 			return true, true
 		case "status":
 			on := s.perm.GroupEnabled(ev.GroupID)
@@ -116,16 +114,23 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 		return true, s.handleDeleteSession(bot, ev, arg)
 	case "/clear", "/清除":
 		return true, s.handleClearSession(bot, ev)
-	case "/models", "/模型":
-		return true, s.handleListModels(ctx, bot, ev, isMaster)
-	case "/model":
-		return true, s.handleSwitchModel(ctx, bot, ev, arg, isMaster)
-	case "/provider", "/providers", "/提供商":
-		return true, s.handleProvider(ctx, bot, ev, arg, isMaster)
-	case "/grant":
-		return true, s.handleGrant(bot, ev, arg, isMaster)
-	case "/ban":
-		return true, s.handleBan(bot, ev, arg, isMaster)
+	case "/models", "/模型", "/model", "/provider", "/providers", "/提供商", "/grant", "/ban":
+		// 主人专属命令: 群内非主人静默, 不刷权限提示(私聊仍提示)
+		if !isMaster {
+			return true, true
+		}
+		switch cmd {
+		case "/models", "/模型":
+			return true, s.handleListModels(ctx, bot, ev, isMaster)
+		case "/model":
+			return true, s.handleSwitchModel(ctx, bot, ev, arg, isMaster)
+		case "/provider", "/providers", "/提供商":
+			return true, s.handleProvider(ctx, bot, ev, arg, isMaster)
+		case "/grant":
+			return true, s.handleGrant(bot, ev, arg, isMaster)
+		case "/ban":
+			return true, s.handleBan(bot, ev, arg, isMaster)
+		}
 	case "/allow":
 		return true, s.handleAllow(bot, ev, arg, isMaster)
 	case "/取消信任":

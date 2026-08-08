@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gobot/core"
@@ -39,6 +40,13 @@ type Service struct {
 	personaMgr   *PersonaManager
 	sched        *sched.Store
 	fileDir      string // 媒体文件保存目录
+	groupMu      sync.Mutex
+	groupNames   map[int64]cachedGroupName // 群名缓存
+}
+
+type cachedGroupName struct {
+	name string
+	at   time.Time
 }
 
 func New(cfg *core.Config, p *perm.Store, s *session.Store, allowStore *allow.Store, bot *core.Bot) *Service {
@@ -188,6 +196,9 @@ func (s *Service) registerBuiltinTools() {
 		rememberTool.Risk = RiskLow
 		s.tools = append(s.tools, rememberTool)
 	}
+
+	// 按消息ID查看消息内容(引用/历史消息)
+	s.registerViewMessageTool()
 }
 
 // rememberCallback AI 主动记忆
@@ -329,19 +340,29 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 	}
 
 	// 判断是否该响应 AI
-	if !s.shouldRespond(bot, ev, isMaster) {
+	respond := s.shouldRespond(bot, ev, isMaster)
+
+	// 心情系统: 群消息即使不触发回复, 也参与情绪感知(轻量规则)与主动回复计数
+	if ev.IsGroup() && s.moodMgr != nil && s.cfg.Mood.Enabled {
+		if !respond {
+			// 未触发回复的消息只做关键词级情绪感知(无 LLM 开销)
+			s.moodMgr.ruleBasedDetect(ev.Text())
+		}
+		// 每N条群消息触发主动回复评估(私聊主动打扰不合适; 本条条会正常回复时不再搭话)
+		if !respond && s.cfg.Mood.Proactive && s.perm.GroupEnabled(ev.GroupID) &&
+			s.moodMgr.CountAndMaybeProactive(ev.GroupID) {
+			s.proactiveReply(ctx, ev.GroupID)
+		}
+	}
+
+	if !respond {
 		return false
 	}
 
-	// 心情系统: 检测情绪变化(群聊+私聊都生效)
+	// 心情系统: 对触发回复的消息做 AI 情绪检测(群聊+私聊都生效)
 	if s.moodMgr != nil && s.cfg.Mood.Enabled {
-		// 情绪检测(从普通文本)
 		if state := s.moodMgr.DetectAndApply(ev.Text()); state != nil {
 			log.Printf("[mood] 检测到情绪: %s (值=%d, 原因=%s)", state.Emotion, state.Value, state.Reason)
-		}
-		// 每N条消息触发主动回复评估(仅群聊, 私聊主动打扰不合适)
-		if ev.IsGroup() && s.cfg.Mood.Proactive && s.moodMgr.CountAndMaybeProactive(ev.GroupID) {
-			s.proactiveReply(ctx, ev.GroupID)
 		}
 	}
 
@@ -359,14 +380,28 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 		log.Printf("[ai] 自动压缩失败: %v", err)
 	}
 
-	// 群内合并会话时, 消息加上发送者标识让 AI 区分用户
+	// 群聊 @ 解析: [CQ:at,qq=xxx] → [@昵称(xxx)], 让模型知道谁被提及
 	userContent := ev.RawMessage
-	if ev.IsGroup() && s.cfg.AI.SessionMode == "merged" {
-		userContent = fmt.Sprintf("[用户%d] %s", ev.UserID, ev.RawMessage)
+	if ev.IsGroup() {
+		userContent = s.resolveAtMentions(ev, userContent)
 	}
 
-	// 提取消息中的图片, 下载转 base64
-	imageDataURLs := extractImageDataURLs(ev)
+	// 引用消息注入: 用户回复引用了某条消息时, 让 AI 看到被引用内容
+	var quoteImages []string
+	if replyID := ev.ReplyID(); replyID > 0 {
+		if quoteText, imgs := s.fetchQuote(replyID); quoteText != "" {
+			userContent = quoteText + "\n" + userContent
+			quoteImages = imgs
+		}
+	}
+
+	// 群内合并会话时, 消息加上发送者标识让 AI 区分用户
+	if ev.IsGroup() && s.cfg.AI.SessionMode == "merged" {
+		userContent = fmt.Sprintf("[用户%d] %s", ev.UserID, userContent)
+	}
+
+	// 提取消息中的图片, 下载转 base64 (引用消息的图片排在主消息图片之前)
+	imageDataURLs := append(quoteImages, extractImageDataURLs(ev)...)
 
 	// 记忆检索: 将相关记忆注入上下文
 	memText := ""
@@ -390,6 +425,11 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 
 	// 记忆注入已移入 buildContextMessages(system prompt/摘要之后、历史消息之前)
 	messages := s.buildContextMessages(ses, memText)
+	// 注入当前环境信息: 群聊告知群名/群号(供 send_group_message 等工具使用)
+	if ev.IsGroup() {
+		envMsg := NewTextMessage("system", fmt.Sprintf("[当前环境] 你正在QQ群「%s」(群号: %d) 中群聊。", s.groupNameOf(ev.GroupID), ev.GroupID))
+		messages = append([]Message{messages[0], envMsg}, messages[1:]...)
+	}
 	if len(imageDataURLs) > 0 {
 		// 图片已转述为文字, 主模型不再接收 base64(避免 token 开销)
 		messages = append(messages, NewTextMessage("user", userContent))
@@ -488,6 +528,8 @@ func (s *Service) systemPrompt() string {
 	if s.cfg.AI.SessionMode == "merged" && strings.Contains(base, "QQ 群") {
 		base += "\n\n注意: 本群多人共享同一个对话, 消息格式为 [用户QQ号] 内容, 请根据上下文判断回复对象。"
 	}
+	// 群聊消息格式指引: @ 与引用
+	base += "\n\n注意: 群聊消息中 [@昵称(QQ号)] 表示有人被提及, [引用消息] 开头的内容是用户回复时引用的消息; 你在回复中写 [@QQ号] 可 @ 对应成员、[@全体成员] 可 @ 全体成员, 仅在确有必要时使用。"
 	if s.skillContext == "" {
 		return base
 	}
@@ -651,6 +693,27 @@ func (s *Service) probabilityGate() bool {
 }
 
 func fmtID(id int64) string { return strings.TrimSpace(int64ToStr(id)) }
+
+// groupNameOf 获取群名称(带 10 分钟缓存, 失败返回空串)
+func (s *Service) groupNameOf(groupID int64) string {
+	s.groupMu.Lock()
+	if s.groupNames == nil {
+		s.groupNames = map[int64]cachedGroupName{}
+	}
+	if c, ok := s.groupNames[groupID]; ok && time.Since(c.at) < 10*time.Minute {
+		name := c.name
+		s.groupMu.Unlock()
+		return name
+	}
+	s.groupMu.Unlock()
+
+	name := s.bot.GetGroupName(groupID)
+
+	s.groupMu.Lock()
+	s.groupNames[groupID] = cachedGroupName{name: name, at: time.Now()}
+	s.groupMu.Unlock()
+	return name
+}
 
 // extractImageDataURLs 从消息段中提取图片, 下载并转为 base64 data URI (供多模态模型使用)
 func extractImageDataURLs(ev *core.Event) []string {

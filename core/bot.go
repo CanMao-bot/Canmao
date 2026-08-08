@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"errors"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -28,6 +31,49 @@ type ForwardSender interface {
 	SendForwardMsg(groupID, userID int64, nodes []ForwardNode) error
 }
 
+// MessageInfo 消息详情(get_msg)
+type MessageInfo struct {
+	MessageID  int64
+	UserID     int64
+	Nickname   string
+	Time       int64
+	Message    []Segment
+	RawMessage string
+}
+
+// MessageGetter 按消息 ID 获取消息(由 adapter 实现)
+type MessageGetter interface {
+	GetMsg(messageID int64) (*MessageInfo, error)
+}
+
+// GetMessage 按消息 ID 获取消息详情(Sender 需实现 MessageGetter)
+func (b *Bot) GetMessage(messageID int64) (*MessageInfo, error) {
+	g, ok := b.Sender.(MessageGetter)
+	if !ok {
+		return nil, errors.New("当前连接不支持 get_msg")
+	}
+	return g.GetMsg(messageID)
+}
+
+// GroupInfoGetter 获取群信息能力(由 adapter 实现)
+type GroupInfoGetter interface {
+	GetGroupInfo(groupID int64) (map[string]interface{}, error)
+}
+
+// GetGroupName 获取群名称(Sender 需实现 GroupInfoGetter), 失败返回空串
+func (b *Bot) GetGroupName(groupID int64) string {
+	g, ok := b.Sender.(GroupInfoGetter)
+	if !ok {
+		return ""
+	}
+	info, err := g.GetGroupInfo(groupID)
+	if err != nil {
+		return ""
+	}
+	name, _ := info["group_name"].(string)
+	return name
+}
+
 // GroupAdminClient 群管理能力(由 adapter 实现), 供插件桥接
 type GroupAdminClient interface {
 	SetGroupBan(groupID, userID int64, duration int) error
@@ -40,6 +86,12 @@ type GroupAdminClient interface {
 	SendGroupNotice(groupID int64, content string) error
 	GetGroupMemberList(groupID int64) ([]map[string]interface{}, error)
 	GetGroupMemberInfo(groupID, userID int64) (map[string]interface{}, error)
+}
+
+// GroupRequestClient 入群申请处理能力(由 adapter 实现)
+type GroupRequestClient interface {
+	SetGroupAddRequest(flag string, approve bool, reason string) error
+	GetStrangerInfo(userID int64) (map[string]interface{}, error)
 }
 
 type Service interface {
@@ -119,6 +171,10 @@ func (b *Bot) Reply(ev *Event, text string) {
 	msg := []Segment{TextSegment(text)}
 	var err error
 	if ev.IsGroup() {
+		// 群聊: 把 [@QQ号] / [@全体成员] 标记转成 at 消息段
+		if segs := parseAtSegments(text); len(segs) > 0 {
+			msg = segs
+		}
 		err = b.Sender.SendGroupMsg(ev.GroupID, ev.UserID, msg)
 	} else {
 		err = b.Sender.SendPrivateMsg(ev.UserID, msg)
@@ -126,6 +182,37 @@ func (b *Bot) Reply(ev *Event, text string) {
 	if err != nil {
 		log.Printf("[core] 发送消息失败: %v", err)
 	}
+}
+
+// atMarkRe 匹配 [@QQ号] / [@全体成员] 标记
+var atMarkRe = regexp.MustCompile(`\[@(\d+|全体成员)\]`)
+
+// parseAtSegments 将文本中的 [@QQ号] / [@全体成员] 标记切分为 text 段和 at 段
+func parseAtSegments(text string) []Segment {
+	locs := atMarkRe.FindAllStringSubmatchIndex(text, -1)
+	if len(locs) == 0 {
+		return nil
+	}
+	segs := make([]Segment, 0, len(locs)*2+1)
+	last := 0
+	for _, loc := range locs {
+		if pre := text[last:loc[0]]; pre != "" {
+			segs = append(segs, TextSegment(pre))
+		}
+		mark := text[loc[2]:loc[3]]
+		if mark == "全体成员" {
+			segs = append(segs, Segment{Type: "at", Data: map[string]interface{}{"qq": "all"}})
+		} else if qq, err := strconv.ParseInt(mark, 10, 64); err == nil {
+			segs = append(segs, AtSegment(qq))
+		} else {
+			segs = append(segs, TextSegment(text[loc[0]:loc[1]]))
+		}
+		last = loc[1]
+	}
+	if tail := text[last:]; tail != "" {
+		segs = append(segs, TextSegment(tail))
+	}
+	return segs
 }
 
 // forwardChunkSize 合并转发单节点最大字符数 (QQ 单条消息上限约 2500)

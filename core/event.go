@@ -17,6 +17,9 @@ type Event struct {
 	Message    []Segment `json:"message"`
 	RawMessage string   `json:"raw_message"`
 	OperatorID int64    `json:"operator_id"`
+	Comment    string   `json:"comment"`        // request 事件的验证信息/入群理由
+	Flag       string   `json:"flag"`           // request 事件的审批标识(set_group_add_request 用)
+	File       map[string]interface{} `json:"file"` // notice group_upload 的群文件信息
 }
 
 type Segment struct {
@@ -69,6 +72,47 @@ func (e *Event) IsMentionedByUser(userID int64) bool {
 		}
 	}
 	return false
+}
+
+// ReplyID 提取引用回复(reply)消息段的被引用消息 ID, 无则 0
+func (e *Event) ReplyID() int64 {
+	for _, seg := range e.Message {
+		if seg.Type != "reply" {
+			continue
+		}
+		switch v := seg.Data["id"].(type) {
+		case string:
+			var id int64
+			fmt.Sscanf(v, "%d", &id)
+			return id
+		case float64:
+			return int64(v)
+		}
+	}
+	return 0
+}
+
+// AtQQs 返回消息中所有 at 段的 QQ 列表("all" 跳过)
+func (e *Event) AtQQs() []int64 {
+	var qqs []int64
+	for _, seg := range e.Message {
+		if seg.Type != "at" {
+			continue
+		}
+		switch v := seg.Data["qq"].(type) {
+		case string:
+			if v == "all" {
+				continue
+			}
+			var id int64
+			if _, err := fmt.Sscanf(v, "%d", &id); err == nil {
+				qqs = append(qqs, id)
+			}
+		case float64:
+			qqs = append(qqs, int64(v))
+		}
+	}
+	return qqs
 }
 
 func (e *Event) Text() string {

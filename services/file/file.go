@@ -129,6 +129,15 @@ func (m *Manager) Name() string { return "file-manager" }
 
 // Handle 检查消息中的图片/文件, 自动下载保存; 处理文件命令
 func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) bool {
+	// 群文件通过 notice group_upload 上报(不走 message)
+	if ev.Type == "notice" && ev.NoticeType == "group_upload" {
+		// notice 无 message_type, 补上以便 enabled/Reply 按群处理
+		ev.DetailType = "group"
+		if !m.enabled(bot, ev) {
+			return false
+		}
+		return m.handleGroupUpload(bot, ev)
+	}
 	if ev.Type != "message" {
 		return false
 	}
@@ -154,20 +163,76 @@ func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 		switch seg.Type {
 		case "image":
 			url, _ := seg.Data["url"].(string)
-			if url == "" {
+			if url != "" {
+				_, _ = m.saveFromURL(url, "", sourceOf(ev))
 				continue
 			}
-			_, _ = m.saveFromURL(url, "", sourceOf(ev))
+			// 无 url 时走 get_image 缓存
+			if fileID, _ := seg.Data["file"].(string); fileID != "" {
+				if _, err := m.SaveImageFromCache(fileID, sourceOf(ev)); err != nil {
+					fmt.Printf("[file] 保存图片失败: %v\n", err)
+				}
+			}
 		case "file":
 			url, _ := seg.Data["url"].(string)
 			name, _ := seg.Data["name"].(string)
-			if url == "" {
+			var saved string
+			var err error
+			if url != "" {
+				saved, err = m.saveFromURL(url, name, sourceOf(ev))
+			} else {
+				// NapCat 私聊文件段常无 url, 用 file_id 走 get_file
+				fileID := segString(seg.Data, "file", "file_id", "id")
+				if fileID == "" {
+					continue
+				}
+				saved, err = m.SaveFileFromCache(fileID, sourceOf(ev))
+			}
+			if err != nil {
+				fmt.Printf("[file] 保存文件 %s 失败: %v\n", name, err)
 				continue
 			}
-			_, _ = m.saveFromURL(url, name, sourceOf(ev))
+			// 追加提示到 RawMessage, 让后续 AI 服务知道文件已到
+			if name == "" {
+				name = saved
+			}
+			ev.RawMessage += fmt.Sprintf(" [收到文件: %s, 已保存为 %s]", name, saved)
 		}
 	}
 	return false // 不消费消息, 让后续服务继续处理
+}
+
+// handleGroupUpload 静默保存群上传文件(不在群里提示)
+func (m *Manager) handleGroupUpload(bot *core.Bot, ev *core.Event) bool {
+	name, _ := ev.File["name"].(string)
+	size, _ := ev.File["size"].(float64)
+	urlStr, _ := ev.File["url"].(string)
+	id, _ := ev.File["id"].(string)
+	var saved string
+	var err error
+	if urlStr != "" {
+		saved, err = m.saveFromURL(urlStr, name, sourceOf(ev))
+	} else if id != "" {
+		saved, err = m.SaveFileFromCache(id, sourceOf(ev))
+	} else {
+		err = fmt.Errorf("群文件缺少 url/id")
+	}
+	if err != nil {
+		fmt.Printf("[file] 保存群文件 %s 失败: %v\n", name, err)
+		return true
+	}
+	fmt.Printf("[file] 已保存群文件: %s (%.1f KB)\n", saved, size/1024)
+	return true
+}
+
+// segString 依次取 data 中多个 key 的首个非空 string 值
+func segString(data map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, _ := data[k].(string); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (m *Manager) handleSendFile(bot *core.Bot, ev *core.Event, arg string) bool {
@@ -215,7 +280,7 @@ func (m *Manager) renderList() string {
 		sz := fmt.Sprintf("%.1f", float64(it.Size)/1024)
 		b.WriteString(fmt.Sprintf("- %s (%s KB, %s, %s)\n", it.Name, sz, it.Source, time.Unix(it.CreatedAt, 0).Format("01-02 15:04")))
 	}
-	b.WriteString("\n用 /sendfile <文件名> 发送到本群, /cleanfiles 手动清理")
+	b.WriteString("\n用 /sendfile <文件名> 发送到当前会话, /cleanfiles 手动清理")
 	return b.String()
 }
 
@@ -443,6 +508,39 @@ func (m *Manager) Tools() []ai.Tool {
 					return "上传失败: " + err.Error(), nil
 				}
 				return "已上传到群 " + fmt.Sprintf("%d", gid), nil
+			},
+		},
+		{
+			Type: "function",
+			Function: ai.ToolFunction{
+				Name:        "send_file",
+				Description: "将已保存的文件发送到当前会话(私聊发给对方/群聊发到本群)",
+				Parameters: ai.ToolParameters{Type: "object", Properties: map[string]*ai.ToolParam{
+					"name": {Type: "string", Description: "已保存的文件名(用 list_files 查看)"},
+				}, Required: []string{"name"}},
+			},
+			Risk: ai.RiskHigh,
+			Callback: func(ctx context.Context, args map[string]interface{}) (string, error) {
+				ev, ok := ctx.Value("event").(*core.Event)
+				if !ok || ev == nil {
+					return "无法获取当前会话", nil
+				}
+				name := args["name"].(string)
+				path, err := m.ResolvePath(name)
+				if err != nil {
+					return err.Error(), nil
+				}
+				base := filepath.Base(path)
+				if ev.IsGroup() {
+					if err := m.files.UploadGroupFile(ev.GroupID, path, base); err != nil {
+						return "上传失败: " + err.Error(), nil
+					}
+					return "已上传到本群: " + base, nil
+				}
+				if err := m.files.UploadPrivateFile(ev.UserID, path, base); err != nil {
+					return "发送失败: " + err.Error(), nil
+				}
+				return "已发送文件: " + base, nil
 			},
 		},
 		{

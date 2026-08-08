@@ -161,8 +161,8 @@ func (m *MoodManager) shouldProactive() bool {
 	if err != nil {
 		return false
 	}
-	// 心情 0-100 → 主动概率 5%-60%
-	p := 0.05 + float64(st.Value)/100.0*0.55
+	// 心情 0-100 → 主动概率 15%-80%
+	p := 0.15 + float64(st.Value)/100.0*0.65
 	return rand.Float64() < p
 }
 
@@ -192,7 +192,7 @@ func (m *MoodManager) ProactivePrompt() (string, error) {
 
 	var _ = context.Background
 
-// proactiveReply 主动回复: 用主模型生成一句搭话发给群
+// proactiveReply 主动回复: 带最近群聊上下文, 用主模型生成一句搭话发给群
 func (s *Service) proactiveReply(ctx context.Context, groupID int64) {
 	if s.moodMgr == nil {
 		return
@@ -201,18 +201,30 @@ func (s *Service) proactiveReply(ctx context.Context, groupID int64) {
 	if err != nil {
 		return
 	}
+	msgs := []Message{{Role: "system", Content: prompt}}
+	// 带上群会话最近消息, 让搭话贴合当前话题
+	if s.session != nil {
+		if ses, serr := s.session.GetCurrent("group", groupID, 0, ""); serr == nil && ses != nil && len(ses.Messages) > 0 {
+			start := len(ses.Messages) - 10
+			if start < 0 {
+				start = 0
+			}
+			for _, m := range ses.Messages[start:] {
+				msgs = append(msgs, Message{Role: m.Role, Content: m.Content})
+			}
+			msgs = append(msgs, Message{Role: "user", Content: "(以上是最近群聊记录) 请自然地发一句话参与群聊。"})
+		}
+	}
 	// 用当前模型生成
 	lvl := s.models.ModelForLevel(levelMember)
 	cctx := WithModelOverride(ctx, lvl)
-	msg, err := s.client.Complete(cctx, []Message{
-		{Role: "system", Content: prompt},
-	}, nil)
+	msg, err := s.client.Complete(cctx, msgs, nil)
 	if err != nil {
 		log.Printf("[mood] 主动回复生成失败: %v", err)
 		return
 	}
 	text := strings.TrimSpace(msg.TextContent())
-	if text == "" || len([]rune(text)) > 60 {
+	if text == "" || len([]rune(text)) > 100 {
 		return
 	}
 	// 发送到群

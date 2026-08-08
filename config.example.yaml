@@ -107,3 +107,6 @@ skills:
 
 plugin:
   dir: "./plugins"
+
+group_request:
+  enabled: true   # 入群申请管理(bot 是群管理时生效)
