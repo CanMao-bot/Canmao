@@ -42,10 +42,16 @@ type Service struct {
 	fileDir      string // 媒体文件保存目录
 	groupMu      sync.Mutex
 	groupNames   map[int64]cachedGroupName // 群名缓存
+	groupMetas   map[int64]cachedGroupMeta // 群 meta(身份/头衔/管理名单)缓存
 }
 
 type cachedGroupName struct {
 	name string
+	at   time.Time
+}
+
+type cachedGroupMeta struct {
+	text string
 	at   time.Time
 }
 
@@ -199,6 +205,7 @@ func (s *Service) registerBuiltinTools() {
 
 	// 按消息ID查看消息内容(引用/历史消息)
 	s.registerViewMessageTool()
+	s.registerMemberInfoTool()
 }
 
 // rememberCallback AI 主动记忆
@@ -425,9 +432,14 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 
 	// 记忆注入已移入 buildContextMessages(system prompt/摘要之后、历史消息之前)
 	messages := s.buildContextMessages(ses, memText)
-	// 注入当前环境信息: 群聊告知群名/群号(供 send_group_message 等工具使用)
+	// 注入当前环境信息(meta): 群名/群号/自己的QQ与群身份/群主管理员名单, 低调一行
 	if ev.IsGroup() {
-		envMsg := NewTextMessage("system", fmt.Sprintf("[当前环境] 你正在QQ群「%s」(群号: %d) 中群聊。", s.groupNameOf(ev.GroupID), ev.GroupID))
+		meta := s.groupMetaOf(ev.GroupID)
+		if meta != "" {
+			meta = " " + meta
+		}
+		envMsg := NewTextMessage("system", fmt.Sprintf("[当前环境] 你是%s(QQ:%d), 正在QQ群「%s」(群号: %d) 中群聊。%s当前时间: %s。",
+			s.bot.Cfg.Bot.Name, s.selfID(), s.groupNameOf(ev.GroupID), ev.GroupID, meta, time.Now().Format("2006-01-02 15:04")))
 		messages = append([]Message{messages[0], envMsg}, messages[1:]...)
 	}
 	if len(imageDataURLs) > 0 {

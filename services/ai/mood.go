@@ -11,6 +11,7 @@ import (
 
 	"gobot/core"
 	"gobot/store/mood"
+	"gobot/store/session"
 )
 
 // MoodManager 全局心情管理: 情绪检测 + 主动回复评估
@@ -187,7 +188,7 @@ func (m *MoodManager) ProactivePrompt() (string, error) {
 	}
 	return fmt.Sprintf("你是一个QQ群里的智能助手, 现在你在群里。%s%s\n"+
 		"请自然地发一句话参与群聊, 可以是对刚才话题的回应、一个轻松的吐槽或一个提问。\n"+
-		"不要太长, 一句话即可, 不要用@, 不要加前缀。", emotionTxt, reason), nil
+		"不要太长, 一句话即可, 不要用@, 不要加前缀, 不要重复你最近已经说过的内容。", emotionTxt, reason), nil
 }
 
 	var _ = context.Background
@@ -230,6 +231,12 @@ func (s *Service) proactiveReply(ctx context.Context, groupID int64) {
 	// 发送到群
 	if err := s.bot.Sender.SendGroupMsg(groupID, 0, []core.Segment{core.TextSegment(text)}); err != nil {
 		log.Printf("[mood] 主动回复发送失败: %v", err)
+	}
+	// 把自己的搭话写回群会话, 避免后续看不到自己说过什么而重复话题
+	if s.session != nil {
+		if ses, serr := s.session.GetCurrent("group", groupID, 0, ""); serr == nil && ses != nil {
+			s.session.Append(ses.ID, []session.Message{{Role: "assistant", Content: text, Time: time.Now().Unix()}}, s.cfg.AI.MaxHistory)
+		}
 	}
 	log.Printf("[mood] 主动回复: %s", text)
 }
