@@ -16,6 +16,8 @@ import (
 func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Event, isMaster bool) (handled, done bool) {
 	// 统一用 cmdOf 解析首个命令 token, 支持 "at+命令" 场景
 	cmd, arg := cmdOf(ev.Text())
+	// 群内无权限命令是否静默(关闭则回复"无权限"/"仅主人可..."提示)
+	silent := core.FeatureOn(s.cfg.Features.SilentDeny)
 
 	if !ev.IsGroup() {
 		// 私聊也支持会话/压缩命令
@@ -69,7 +71,10 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 			bot.Reply(ev, "用法: /bot on 或 /bot off")
 			return true, true
 		}
-		// 无权限的普通成员静默处理, 不在群里刷权限提示
+		// 无权限的普通成员默认静默处理, 不在群里刷权限提示
+		if !silent {
+			bot.Reply(ev, "无权限")
+		}
 		return true, true
 	case "/ai":
 		role, _ := s.perm.GetGroupRole(ev.GroupID, ev.UserID)
@@ -79,15 +84,17 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 			if canAdmin {
 				s.perm.SetGroupAI(ev.GroupID, true)
 				bot.Reply(ev, "已开启本群 AI 功能")
+			} else if !silent {
+				bot.Reply(ev, "无权限")
 			}
-			// 无权限静默
 			return true, true
 		case "off", "关":
 			if canAdmin {
 				s.perm.SetGroupAI(ev.GroupID, false)
 				bot.Reply(ev, "已关闭本群 AI 功能")
+			} else if !silent {
+				bot.Reply(ev, "无权限")
 			}
-			// 无权限静默
 			return true, true
 		case "status":
 			on := s.perm.GroupEnabled(ev.GroupID)
@@ -115,8 +122,8 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 	case "/clear", "/清除":
 		return true, s.handleClearSession(bot, ev)
 	case "/models", "/模型", "/model", "/provider", "/providers", "/提供商", "/grant", "/ban":
-		// 主人专属命令: 群内非主人静默, 不刷权限提示(私聊仍提示)
-		if !isMaster {
+		// 主人专属命令: 群内非主人默认静默, 不刷权限提示; 关闭静默时走 handler 内的"仅主人可..."提示
+		if !isMaster && silent {
 			return true, true
 		}
 		switch cmd {

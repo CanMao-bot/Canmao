@@ -172,8 +172,10 @@ func (b *Bot) Reply(ev *Event, text string) {
 	var err error
 	if ev.IsGroup() {
 		// 群聊: 把 [@QQ号] / [@全体成员] 标记转成 at 消息段
-		if segs := parseAtSegments(text); len(segs) > 0 {
-			msg = segs
+		if FeatureOn(b.Cfg.Features.AtSend) {
+			if segs := parseAtSegments(text); len(segs) > 0 {
+				msg = segs
+			}
 		}
 		err = b.Sender.SendGroupMsg(ev.GroupID, ev.UserID, msg)
 	} else {

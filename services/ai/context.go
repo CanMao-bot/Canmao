@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"gobot/core"
 	"gobot/store/session"
 )
 
@@ -176,7 +177,7 @@ func (s *Service) buildContextMessages(ses *session.Session, memText string) []M
 	for _, m := range ses.Messages {
 		content := m.Content
 		// 带时间戳, 让模型感知时间间隔/区分早晚消息
-		if m.Time > 0 {
+		if m.Time > 0 && core.FeatureOn(s.cfg.Features.MsgTimestamp) {
 			content = fmt.Sprintf("[%s] %s", time.Unix(m.Time, 0).Format("01-02 15:04"), content)
 		}
 		msgs = append(msgs, Message{Role: m.Role, Content: content})

@@ -110,3 +110,15 @@ plugin:
 
 group_request:
   enabled: true   # 入群申请管理(bot 是群管理时生效)
+
+features:                 # 细粒度功能开关, 缺省(不写)均为开启
+  quote: true           # 引用消息注入 + view_message 工具
+  at_parse: true        # 收到的 @ 解析为 [@昵称(QQ)]
+  at_send: true         # 回复中 [@QQ号] 转为真实 at
+  file_fallback: true   # 私聊文件/图片无url时兜底接收
+  group_file_save: true # 群文件自动保存
+  file_recv_hint: true  # 收到文件提示 AI
+  silent_deny: true     # 群内无权限命令静默
+  env_inject: true      # 群上下文注入[当前环境]
+  group_meta: true      # 群 meta 信息 + get_member_info 工具
+  msg_timestamp: true   # 历史消息时间戳

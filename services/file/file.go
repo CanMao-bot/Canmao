@@ -131,6 +131,9 @@ func (m *Manager) Name() string { return "file-manager" }
 func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) bool {
 	// 群文件通过 notice group_upload 上报(不走 message)
 	if ev.Type == "notice" && ev.NoticeType == "group_upload" {
+		if !core.FeatureOn(m.bot.Cfg.Features.GroupFileSave) {
+			return false
+		}
 		// notice 无 message_type, 补上以便 enabled/Reply 按群处理
 		ev.DetailType = "group"
 		if !m.enabled(bot, ev) {
@@ -167,7 +170,10 @@ func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 				_, _ = m.saveFromURL(url, "", sourceOf(ev))
 				continue
 			}
-			// 无 url 时走 get_image 缓存
+			// 无 url 时走 get_image 缓存兜底接收
+			if !core.FeatureOn(m.bot.Cfg.Features.FileFallback) {
+				continue
+			}
 			if fileID, _ := seg.Data["file"].(string); fileID != "" {
 				if _, err := m.SaveImageFromCache(fileID, sourceOf(ev)); err != nil {
 					fmt.Printf("[file] 保存图片失败: %v\n", err)
@@ -181,7 +187,10 @@ func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 			if url != "" {
 				saved, err = m.saveFromURL(url, name, sourceOf(ev))
 			} else {
-				// NapCat 私聊文件段常无 url, 用 file_id 走 get_file
+				// NapCat 私聊文件段常无 url, 用 file_id 走 get_file 兜底接收
+				if !core.FeatureOn(m.bot.Cfg.Features.FileFallback) {
+					continue
+				}
 				fileID := segString(seg.Data, "file", "file_id", "id")
 				if fileID == "" {
 					continue
@@ -192,7 +201,10 @@ func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 				fmt.Printf("[file] 保存文件 %s 失败: %v\n", name, err)
 				continue
 			}
-			// 追加提示到 RawMessage, 让后续 AI 服务知道文件已到
+			// 追加提示到 RawMessage, 让后续 AI 服务知道文件已到(文件仍保存, 只是不提示)
+			if !core.FeatureOn(m.bot.Cfg.Features.FileRecvHint) {
+				continue
+			}
 			if name == "" {
 				name = saved
 			}

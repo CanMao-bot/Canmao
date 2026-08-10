@@ -182,3 +182,38 @@ func TestReplyPrivateNoAtParse(t *testing.T) {
 		t.Fatalf("私聊应保持纯文本, got %v", got)
 	}
 }
+
+func TestFeatureOn(t *testing.T) {
+	// nil 视为开启
+	if !FeatureOn(nil) {
+		t.Fatal("nil 应视为开启")
+	}
+	on, off := true, false
+	if !FeatureOn(&on) {
+		t.Fatal("true 应为开启")
+	}
+	if FeatureOn(&off) {
+		t.Fatal("false 应为关闭")
+	}
+}
+
+func TestReplyGroupAtSendDisabled(t *testing.T) {
+	// at_send 关闭时, 群聊回复保持纯文本单段
+	off := false
+	cfg := &Config{
+		Bot:      BotConfig{LongMessageForward: false, LongMessageThreshold: 200},
+		Features: FeaturesConfig{AtSend: &off},
+	}
+	bot := NewBot(cfg)
+	var got []Segment
+	sender := &testSender{sendGroup: func(gid, uid int64, msg []Segment) error {
+		got = msg
+		return nil
+	}}
+	bot.SetSender(sender)
+	ev := &Event{Type: "message", DetailType: "group", GroupID: 1, UserID: 2}
+	bot.Reply(ev, "好的 [@10001] 马上处理")
+	if len(got) != 1 || got[0].Type != "text" || got[0].Data["text"] != "好的 [@10001] 马上处理" {
+		t.Fatalf("at_send 关闭应保持纯文本, got %v", got)
+	}
+}

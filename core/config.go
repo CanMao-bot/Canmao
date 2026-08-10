@@ -24,7 +24,25 @@ type Config struct {
 	Skills SkillsConfig `yaml:"skills"`
 	Plugin PluginConfig `yaml:"plugin"`
 	GroupReq GroupReqConfig `yaml:"group_request"`
+	Features FeaturesConfig `yaml:"features"`
 }
+
+// FeaturesConfig 细粒度功能开关(*bool, nil=默认开启)
+type FeaturesConfig struct {
+	Quote         *bool `yaml:"quote"`           // 引用消息注入 + view_message 工具
+	AtParse       *bool `yaml:"at_parse"`        // 收到的 [CQ:at] 解析为 [@昵称(QQ)]
+	AtSend        *bool `yaml:"at_send"`         // 回复中 [@QQ号] 转为真实 at 段
+	FileFallback  *bool `yaml:"file_fallback"`   // 私聊文件/图片无 url 时 get_file/get_image 兜底接收
+	GroupFileSave *bool `yaml:"group_file_save"` // 群文件(group_upload notice)自动保存
+	FileRecvHint  *bool `yaml:"file_recv_hint"`  // 收到文件时给 AI 追加 [收到文件] 提示
+	SilentDeny    *bool `yaml:"silent_deny"`     // 群内无权限命令静默(关闭则回复"无权限")
+	EnvInject     *bool `yaml:"env_inject"`      // 群上下文注入 [当前环境](群名/群号/时间)
+	GroupMeta     *bool `yaml:"group_meta"`      // 群 meta(自己身份/头衔/管理名单) + get_member_info 工具
+	MsgTimestamp  *bool `yaml:"msg_timestamp"`   // 历史消息时间戳前缀
+}
+
+// FeatureOn 功能开关取值: nil 视为开启
+func FeatureOn(p *bool) bool { return p == nil || *p }
 
 // GroupReqConfig 入群申请管理配置
 type GroupReqConfig struct {
