@@ -42,6 +42,7 @@
 
 - **API Key 都可通过 `/provider` 与 config 增删改**：千万别写死在代码里。所有外部模型(LLM/embedding/图像/TTS)走 OpenAI 兼容 `/compatible-mode/v1` 接口。
 - **工具注册**：AI 工具用 `NewTool(name, desc, params, required, handler)` 创建，`AddTool()` 注入；`RiskHigh` 工具(如 `run_command`、`opencode_task`)需人工审批或进 allow 白名单。
+- **审批不可绕过**：群管理工具(禁言/改昵称/踢人/改群名)的审批在 `executeTool` 硬编码，提示词注入/自称主人无法绕过；`canApprove` 校验真实 `ev.UserID`。心情自主惩罚(`mood.go MaybePunishAggressor`)只针对代码记录的 `ev.UserID` 辱骂者，禁止改为 AI 猜测目标。改动相关逻辑必须保留：审批硬编码 + `ownerIdentityTxt` 防误伤主人。
 - **opencode 必须用绝对路径**：systemd root 环境无 nvm PATH；`acp.binary` 指向 `opencode.exe` 完整路径，且服务已注入 node PATH。
 - **新增服务**：在 `main.go` 装配 + `core/config.go` 加配置节 + 相应 `services/*` 包。改完务必 `go build` 验证。
 - **合并转发**：回复超 `long_message_threshold`(200) 自动合并转发。

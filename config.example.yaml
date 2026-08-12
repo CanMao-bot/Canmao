@@ -56,6 +56,12 @@ mood:
   proactive: true     # 主动回复开关(每N条群消息后按心情决定是否搭话)
   every_n: 10
   remember_tool: true # 给 AI 主动记忆工具(remember)
+  cooldown_min_minutes: 5    # 插话冷却最小分钟(普通搭话后)
+  cooldown_max_minutes: 15   # 插话冷却最大分钟(实际取 min~max 随机区间, 防刷屏更自然)
+  care_cooldown_minutes: 2   # 情感关怀冷却分钟(用户低落安慰后, 更短便于继续关心)
+  punish_enabled: true       # 心情驱动自主管理操作: 心情极差时对惹怒 bot 的用户禁言/改昵称(AI自主, 免审批)
+  punish_mood_threshold: 30  # 自主惩罚心情阈值: 值低于此或情绪为 angry 时可能触发
+  punish_cooldown_minutes: 30 # 自主惩罚间隔(防反复惩罚同一人)
 
 persona:
   enabled: true

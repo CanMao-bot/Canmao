@@ -93,8 +93,14 @@ type PersonaConfig struct {
 type MoodConfig struct {
 	Enabled      bool `yaml:"enabled"`        // 心情系统开关
 	Proactive    bool `yaml:"proactive"`      // 主动回复开关
-	EveryN       int  `yaml:"every_n"`        // 每N条群消息评估一次主动回复
+	EveryN       int  `yaml:"every_n"`        // 每N条群消息到达一次插话检查点(默认15)
 	RememberTool bool `yaml:"remember_tool"`  // 是否给 AI 主动记忆工具
+	CooldownMin  int  `yaml:"cooldown_min_minutes"`  // 插话冷却最小分钟(默认5)
+	CooldownMax  int  `yaml:"cooldown_max_minutes"`  // 插话冷却最大分钟(默认15, 实际取随机区间)
+	CareCooldown int  `yaml:"care_cooldown_minutes"` // 情感关怀冷却分钟(默认2, 低落时更快再次安慰)
+	PunishEnabled      bool `yaml:"punish_enabled"`       // 心情驱动自主管理操作开关(心情极差时禁言/改昵称惹怒者, 免审批)
+	PunishMoodThreshold int `yaml:"punish_mood_threshold"` // 自主惩罚心情阈值(默认30, 值低于此或 angry 时触发)
+	PunishCooldownMin   int `yaml:"punish_cooldown_minutes"` // 自主惩罚间隔分钟(默认30, 防反复惩罚)
 }
 
 // MemoryConfig 记忆机制配置
@@ -256,7 +262,25 @@ func (c *Config) applyDefaults() {
 		c.ACP.Timeout = 300
 	}
 	if c.Mood.EveryN <= 0 {
-		c.Mood.EveryN = 10
+		c.Mood.EveryN = 15
+	}
+	if c.Mood.CooldownMin <= 0 {
+		c.Mood.CooldownMin = 5
+	}
+	if c.Mood.CooldownMax < c.Mood.CooldownMin {
+		c.Mood.CooldownMax = c.Mood.CooldownMin
+	}
+	if c.Mood.CooldownMax <= 0 {
+		c.Mood.CooldownMax = 15
+	}
+	if c.Mood.CareCooldown <= 0 {
+		c.Mood.CareCooldown = 2
+	}
+	if c.Mood.PunishMoodThreshold <= 0 {
+		c.Mood.PunishMoodThreshold = 30
+	}
+	if c.Mood.PunishCooldownMin <= 0 {
+		c.Mood.PunishCooldownMin = 30
 	}
 	if c.Persona.ImproveEvery <= 0 {
 		c.Persona.ImproveEvery = 20

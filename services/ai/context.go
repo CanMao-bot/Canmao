@@ -176,9 +176,10 @@ func (s *Service) buildContextMessages(ses *session.Session, memText string) []M
 	}
 	for _, m := range ses.Messages {
 		content := m.Content
-		// 带时间戳, 让模型感知时间间隔/区分早晚消息
+		// 带时间戳标注, 让模型感知时间间隔/区分早晚消息
+		// 用【】括起并明示是系统标记, 防止模型误把时间戳当输出内容
 		if m.Time > 0 && core.FeatureOn(s.cfg.Features.MsgTimestamp) {
-			content = fmt.Sprintf("[%s] %s", time.Unix(m.Time, 0).Format("01-02 15:04"), content)
+			content = fmt.Sprintf("【%s·系统时间标注】%s", time.Unix(m.Time, 0).Format("01-02 15:04"), content)
 		}
 		msgs = append(msgs, Message{Role: m.Role, Content: content})
 	}

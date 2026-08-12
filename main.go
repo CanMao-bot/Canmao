@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"gobot/adapter"
 	"gobot/core"
@@ -130,8 +131,20 @@ func main() {
 			log.Printf("[mood] 初始化心情存储失败: %v", err)
 		} else {
 			moodMgr := ai.NewMoodManager(moodStore, bot, cfg.Mood.EveryN)
+			moodMgr.SetCooldown(
+				time.Duration(cfg.Mood.CooldownMin)*time.Minute,
+				time.Duration(cfg.Mood.CooldownMax)*time.Minute,
+				time.Duration(cfg.Mood.CareCooldown)*time.Minute,
+			)
+			moodMgr.SetPunish(
+				cfg.Mood.PunishEnabled,
+				cfg.Mood.PunishMoodThreshold,
+				time.Duration(cfg.Mood.PunishCooldownMin)*time.Minute,
+			)
 			aiSvc.SetMoodManager(moodMgr)
-			log.Printf("[mood] 心情系统已启用 (proactive=%v, everyN=%d)", cfg.Mood.Proactive, cfg.Mood.EveryN)
+			log.Printf("[mood] 心情系统已启用 (proactive=%v, cooldown=%d-%dmin, care=%dmin, punish=%v/%dmin)",
+				cfg.Mood.Proactive, cfg.Mood.CooldownMin, cfg.Mood.CooldownMax, cfg.Mood.CareCooldown,
+				cfg.Mood.PunishEnabled, cfg.Mood.PunishCooldownMin)
 		}
 	}
 	// 人设系统

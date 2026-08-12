@@ -22,6 +22,22 @@ func (s *Service) selfID() int64 {
 	return id
 }
 
+// ownerIdentityTxt 主人/管理员的身份说明(供 AI 上下文感知, 避免自主操作误伤)
+func (s *Service) ownerIdentityTxt() string {
+	var parts []string
+	if m := s.bot.Cfg.Bot.MasterID; m != "" {
+		parts = append(parts, "主人(最高权限): QQ "+m)
+	}
+	if len(s.bot.Cfg.Bot.AdminIDs) > 0 {
+		parts = append(parts, "管理员: "+strings.Join(s.bot.Cfg.Bot.AdminIDs, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "=== 权限身份 ===\n" + strings.Join(parts, "。") +
+		"。\n自主执行任何涉及禁言、改昵称、踢人等群管理操作时, 绝不能对主人和管理员执行。"
+}
+
 // roleText 群成员身份中文
 func roleText(role string) string {
 	switch role {
