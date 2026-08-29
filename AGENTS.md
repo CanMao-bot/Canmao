@@ -38,12 +38,18 @@
 - `memory`、`mood`、`persona`、`web`、`sched`、`media`、`acp`、`mcp`、`skills`、`plugin` 均为对应功能开关。
 - `web.proxy` 指向 HTTP/SOCKS5 代理（外网受限环境访问国外网站需要，个人环境自行配置）。
 
+## 工程取舍原则（主人拍板）
+
+- **不追求极简**：不为了少依赖、少代码、小体积牺牲架构与性能。依赖数量、二进制大小、代码量不设限。
+- **架构合理 + 性能合理即可**：评估方案时以此为唯一标准。需要引第三方依赖（如 fsnotify 热重载、更重的存储引擎）时直接引，不必为了「零依赖风格」绕路或削功能。
+
 ## 关键约定与踏坑
 
 - **API Key 都可通过 `/provider` 与 config 增删改**：千万别写死在代码里。所有外部模型(LLM/embedding/图像/TTS)走 OpenAI 兼容 `/compatible-mode/v1` 接口。
 - **工具注册**：AI 工具用 `NewTool(name, desc, params, required, handler)` 创建，`AddTool()` 注入；`RiskHigh` 工具(如 `run_command`、`opencode_task`)需人工审批或进 allow 白名单。
 - **审批不可绕过**：群管理工具(禁言/改昵称/踢人/改群名)的审批在 `executeTool` 硬编码，提示词注入/自称主人无法绕过；`canApprove` 校验真实 `ev.UserID`。心情自主惩罚(`mood.go MaybePunishAggressor`)只针对代码记录的 `ev.UserID` 辱骂者，禁止改为 AI 猜测目标。改动相关逻辑必须保留：审批硬编码 + `ownerIdentityTxt` 防误伤主人。
 - **opencode 必须用绝对路径**：systemd root 环境无 nvm PATH；`acp.binary` 指向 `opencode.exe` 完整路径，且服务已注入 node PATH。
+- **插件热加载**：插件桥监听插件目录(fsnotify)，`.so` 变动自动重载；也可在 QQ 发 `/plugin reload`(主人/管理员)。**硬约束**：Go 的 `plugin.Open` 对同路径有进程级缓存且 `.so` 无法卸载——更新插件必须换新文件名(如 `echo.v2.so`)，旧版本代码驻留内存至进程重启；删除 `.so` 即下线插件。插件 `Init`/`Setup` 需可重入(热加载会再次调用)。相关实现：`services/plugin/service.go` 的 `ReloadFrom`/`swapPlugins`/`StartWatcher`，工具替换走 `ai.Service.ReplaceToolsByPrefix`(按 `插件名_` 前缀幂等替换)。
 - **新增服务**：在 `main.go` 装配 + `core/config.go` 加配置节 + 相应 `services/*` 包。改完务必 `go build` 验证。
 - **合并转发**：回复超 `long_message_threshold`(200) 自动合并转发。
 - **Session 模式**：`session_mode: merged` 群内全群共享上下文；`separate` 按用户。

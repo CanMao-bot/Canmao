@@ -276,7 +276,10 @@ func main() {
 		log.Printf("[plugin] 警告: %v", err)
 	}
 	ps := plugin.NewService(plugs, aiSvc, bot, cfg, ws, permStore)
+	ps.SetLoader(pluginMgr, cfg.Plugin.Dir)
 	bot.RegisterService(ps)
+	// 插件目录热加载监听(.so 变动自动重载)
+	ps.StartWatcher(ctx)
 
 	// 注册 AI 服务(最后注册, 兜底响应)
 	bot.RegisterService(aiSvc)

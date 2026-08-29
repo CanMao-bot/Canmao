@@ -251,7 +251,7 @@ func TestSendFileToolPrivate(t *testing.T) {
 	}
 
 	ev := &core.Event{Type: "message", DetailType: "private", UserID: 100}
-	ctx := context.WithValue(context.Background(), "event", ev)
+	ctx := core.WithEvent(context.Background(), ev)
 	out, err := cb(ctx, map[string]interface{}{"name": "x.txt"})
 	if err != nil {
 		t.Fatal(err)

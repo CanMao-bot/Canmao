@@ -30,6 +30,7 @@ type Service struct {
 	session      *session.Store
 	allow        *allow.Store
 	bot          *core.Bot
+	toolsMu      sync.RWMutex // 保护 tools: 插件热加载在运行期写, agent 循环在运行期读
 	tools        []Tool
 	skillContext string
 	approvals    *ApprovalManager
@@ -213,11 +214,39 @@ func (s *Service) providerReady() bool {
 
 func (s *Service) Name() string { return "ai-agent" }
 
-func (s *Service) AddTool(t Tool) { s.tools = append(s.tools, t) }
+// AddTool 注册单个工具(运行期安全)
+func (s *Service) AddTool(t Tool) {
+	s.toolsMu.Lock()
+	defer s.toolsMu.Unlock()
+	s.tools = append(s.tools, t)
+}
+
+// ReplaceToolsByPrefix 按工具名前缀替换工具集(插件热加载用):
+// 删除所有以 prefix 开头的旧工具后追加 tools, 未命中前缀的工具保持不变。
+func (s *Service) ReplaceToolsByPrefix(prefix string, tools []Tool) {
+	s.toolsMu.Lock()
+	defer s.toolsMu.Unlock()
+	kept := make([]Tool, 0, len(s.tools)+len(tools))
+	for _, t := range s.tools {
+		if strings.HasPrefix(t.Function.Name, prefix) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	s.tools = append(kept, tools...)
+}
+
+// toolsSnapshot 供 agent 循环读取的一致性快照
+func (s *Service) toolsSnapshot() []Tool {
+	s.toolsMu.RLock()
+	defer s.toolsMu.RUnlock()
+	return s.tools
+}
 
 func (s *Service) SetSkillContext(ctx string) { s.skillContext = ctx }
 
-func (s *Service) Tools() []Tool { return s.tools }
+// Tools 返回当前工具集快照
+func (s *Service) Tools() []Tool { return s.toolsSnapshot() }
 
 func (s *Service) registerBuiltinTools() {
 	s.registerAdminTools()
@@ -251,8 +280,8 @@ func (s *Service) registerBuiltinTools() {
 			"messages": {Type: "array", Description: "要发送的消息数组, 按顺序依次发送, 每个元素是一句短消息字符串"},
 		}, []string{"messages"},
 		func(ctx context.Context, args map[string]interface{}) (string, error) {
-			ev, ok := ctx.Value("event").(*core.Event)
-			if !ok || ev == nil {
+			ev := core.EventFrom(ctx)
+			if ev == nil {
 				return "", errNoEvent
 			}
 			raw, ok := args["messages"].([]interface{})
@@ -336,8 +365,8 @@ func (s *Service) registerBuiltinTools() {
 
 // rememberCallback AI 主动记忆
 func (s *Service) rememberCallback(ctx context.Context, args map[string]interface{}) (string, error) {
-	ev, ok := ctx.Value("event").(*core.Event)
-	if !ok || ev == nil {
+	ev := core.EventFrom(ctx)
+	if ev == nil {
 		return "", errNoEvent
 	}
 	content, _ := args["content"].(string)
@@ -352,8 +381,8 @@ func (s *Service) rememberCallback(ctx context.Context, args map[string]interfac
 }
 
 func (s *Service) askCallback(ctx context.Context, args map[string]interface{}) (string, error) {
-	ev, ok := ctx.Value("event").(*core.Event)
-	if !ok || ev == nil {
+	ev := core.EventFrom(ctx)
+	if ev == nil {
 		return "", errNoEvent
 	}
 	rawQ, ok := args["questions"].([]interface{})
@@ -727,7 +756,7 @@ func (s *Service) systemPrompt() string {
 
 func (s *Service) runAgent(ctx context.Context, messages []Message, ev *core.Event) (string, error) {
 	// 注入事件到上下文, 供工具使用
-	ctx = context.WithValue(ctx, "event", ev)
+	ctx = core.WithEvent(ctx, ev)
 	cur := messages
 	maxIter := s.cfg.AI.MaxIterations
 	if maxIter <= 0 {
@@ -747,7 +776,7 @@ func (s *Service) runAgent(ctx context.Context, messages []Message, ev *core.Eve
 			return "", fmt.Errorf("对话上下文超限(%d tokens), 请压缩会话后重试", est)
 		}
 
-		msg, err := s.client.Complete(ctx, cur, s.tools)
+		msg, err := s.client.Complete(ctx, cur, s.toolsSnapshot())
 		if err != nil {
 			return "", err
 		}
@@ -758,7 +787,7 @@ func (s *Service) runAgent(ctx context.Context, messages []Message, ev *core.Eve
 		cur = append(cur, *msg)
 		executed := false
 		for _, tc := range msg.ToolCalls {
-			// 工具调用去重: 同一工具同一参数连续调用超过3次, 中断防死循环
+			// 工具调用去重: 同一工具同一参数累计调用超过10次, 中断防死循环
 			key := tc.Function.Name + "|" + tc.Function.Arguments
 			toolCallsSeen[key]++
 			if toolCallsSeen[key] > 10 {
@@ -804,9 +833,9 @@ func (s *Service) executeTool(ctx context.Context, tc ToolCall) string {
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		args = map[string]interface{}{}
 	}
-	ev, _ := ctx.Value("event").(*core.Event)
+	ev := core.EventFrom(ctx)
 
-	for _, t := range s.tools {
+	for _, t := range s.toolsSnapshot() {
 		if t.Function.Name == tc.Function.Name {
 			if t.Callback == nil {
 				return "工具已注册但无回调"
@@ -925,9 +954,15 @@ func extractImageDataURLs(ev *core.Event) []string {
 	return urls
 }
 
+// imageHTTPClient 下载图片用: 必须带超时, 否则慢速/挂起的源会永久占住处理 goroutine
+var imageHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// maxImageBytes 单张图片下载大小上限 (20MB): base64 后约 27MB, 已超多数多模态模型限制
+const maxImageBytes = 20 << 20
+
 // downloadImageAsDataURI 下载图片并转 base64 data URI
 func downloadImageAsDataURI(rawURL string) (string, error) {
-	resp, err := http.Get(rawURL)
+	resp, err := imageHTTPClient.Get(rawURL)
 	if err != nil {
 		return "", err
 	}
@@ -935,9 +970,13 @@ func downloadImageAsDataURI(rawURL string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	// 限制读取大小, 防超大/恶意文件撑爆内存
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(data) > maxImageBytes {
+		return "", fmt.Errorf("图片超过大小上限(%dMB)", maxImageBytes>>20)
 	}
 	// 从 Content-Type 推断 MIME
 	mime := resp.Header.Get("Content-Type")
