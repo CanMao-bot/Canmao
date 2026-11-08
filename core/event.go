@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -151,4 +152,18 @@ type ForwardNode struct {
 	Name     string    `json:"name,omitempty"`
 	Nickname string    `json:"nickname,omitempty"`
 	Content  []Segment `json:"content"`
+}
+
+// CtxEventKey context key 类型(避免裸 string key 碰撞), 存放当前处理的 *Event
+type CtxEventKey struct{}
+
+// WithEvent 将事件注入 context, 供工具/服务链取用
+func WithEvent(ctx context.Context, ev *Event) context.Context {
+	return context.WithValue(ctx, CtxEventKey{}, ev)
+}
+
+// EventFrom 从 context 取当前事件, 无则返回 nil
+func EventFrom(ctx context.Context) *Event {
+	ev, _ := ctx.Value(CtxEventKey{}).(*Event)
+	return ev
 }

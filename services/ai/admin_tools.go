@@ -17,7 +17,7 @@ func (s *Service) registerAdminTools() {
 		return g, ok
 	}
 	curGroup := func(ctx context.Context) (int64, bool) {
-		if ev, ok := ctx.Value("event").(*core.Event); ok && ev != nil && ev.IsGroup() {
+		if ev := core.EventFrom(ctx); ev != nil && ev.IsGroup() {
 			return ev.GroupID, true
 		}
 		return 0, false

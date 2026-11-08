@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Sender interface {
@@ -100,18 +101,27 @@ type Service interface {
 }
 
 type Bot struct {
-	Cfg     *Config
-	Sender  Sender
-	Forward ForwardSender
+	Cfg      *Config
+	Sender   Sender
+	Forward  ForwardSender
 	services []Service
-	mu      sync.RWMutex
-	ctx     context.Context
-	cancel  context.CancelFunc
+	mu       sync.RWMutex
+	ctx      context.Context
+	cancel   context.CancelFunc
+	// dispatch 背压: 限制并发处理的事件数, 防止消息洪峰(刷屏/被拉群)无限起 goroutine 打爆 LLM API
+	dispatchSem chan struct{}
 }
+
+// maxDispatchConcurrency 全局并发事件处理上限。
+// 审批等待等长阻塞也会占用名额, 容量需留足余量(正常聊天很难同时有几十个在途事件)。
+const maxDispatchConcurrency = 64
+
+// dispatchDropWait 事件满载时的最长等待; 超时丢弃防止无界堆积
+const dispatchDropWait = 5 * time.Second
 
 func NewBot(cfg *Config) *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Bot{Cfg: cfg, ctx: ctx, cancel: cancel}
+	return &Bot{Cfg: cfg, ctx: ctx, cancel: cancel, dispatchSem: make(chan struct{}, maxDispatchConcurrency)}
 }
 
 func (b *Bot) SetSender(s Sender) {
@@ -134,7 +144,17 @@ func (b *Bot) Shutdown() { b.cancel() }
 
 func (b *Bot) Dispatch(ev *Event) {
 	// 异步分发: Agent 等待用户审批时不能阻塞 WS 读取循环
-	go b.dispatch(ev)
+	// 背压: 先占全局并发名额, 满载短暂等待后丢弃(带日志), 避免 goroutine/API 无限膨胀
+	select {
+	case b.dispatchSem <- struct{}{}:
+	case <-time.After(dispatchDropWait):
+		log.Printf("[core] 事件处理满载(>=%d 并发), 丢弃消息 (id=%d, user=%d)", maxDispatchConcurrency, ev.MessageID, ev.UserID)
+		return
+	}
+	go func() {
+		defer func() { <-b.dispatchSem }()
+		b.dispatch(ev)
+	}()
 }
 
 func (b *Bot) dispatch(ev *Event) {
@@ -143,7 +163,7 @@ func (b *Bot) dispatch(ev *Event) {
 	copy(svcs, b.services)
 	b.mu.RUnlock()
 
-	ctx := context.WithValue(b.ctx, "event", ev)
+	ctx := WithEvent(b.ctx, ev)
 	for _, svc := range svcs {
 		if svc.Handle(ctx, b, ev) {
 			return
@@ -154,7 +174,7 @@ func (b *Bot) dispatch(ev *Event) {
 func (b *Bot) Reply(ev *Event, text string) {
 	// 长消息用合并转发发送
 	if b.Cfg.Bot.LongMessageForward && len([]rune(text)) > b.Cfg.Bot.LongMessageThreshold && b.Forward != nil {
-		// 拆分为多条节点, 每条约 1500 字符
+		// 拆分为多条节点, 每条不超过 forwardChunkSize (2500) 字符
 		nodes := splitForwardNodes(text, b.Cfg.Bot.Name, ev.UserID)
 		var err error
 		if ev.IsGroup() {

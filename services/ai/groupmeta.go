@@ -169,7 +169,7 @@ func (s *Service) registerMemberInfoTool() {
 			}
 			gid := int64From(args["group_id"])
 			if gid <= 0 {
-				if ev, ok := ctx.Value("event").(*core.Event); ok && ev != nil {
+				if ev := core.EventFrom(ctx); ev != nil {
 					gid = ev.GroupID
 				}
 			}

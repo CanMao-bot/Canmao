@@ -326,9 +326,14 @@ func (m *Manager) saveFromURL(rawURL, hintName, source string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	// 限制读取大小, 防异常大文件撑爆内存 (100MB)
+	const maxFileBytes = 100 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(data) > maxFileBytes {
+		return "", fmt.Errorf("文件超过大小上限(%dMB)", maxFileBytes>>20)
 	}
 
 	// 生成文件名
@@ -533,8 +538,8 @@ func (m *Manager) Tools() []ai.Tool {
 			},
 			Risk: ai.RiskHigh,
 			Callback: func(ctx context.Context, args map[string]interface{}) (string, error) {
-				ev, ok := ctx.Value("event").(*core.Event)
-				if !ok || ev == nil {
+				ev := core.EventFrom(ctx)
+				if ev == nil {
 					return "无法获取当前会话", nil
 				}
 				name := args["name"].(string)

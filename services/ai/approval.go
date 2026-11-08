@@ -208,7 +208,9 @@ func scopeOf(ev *core.Event) (string, int64) {
 }
 
 func isAlwaysAllow(s string) bool {
-	for _, w := range []string{"以后都允许", "以后都同意", "永久允许", "总是允许", "一直允许", "always", "allow always", "记住"} {
+	// 注意: 不可包含裸「记住」——用户让 AI 存记忆时会说「记住XXX」,
+	// 审批等待期间会被误判为永久授权(提示词注入/误操作风险)。
+	for _, w := range []string{"以后都允许", "以后都同意", "永久允许", "总是允许", "一直允许", "记住允许", "记住这个操作", "记住这个权限", "always", "allow always"} {
 		if strings.Contains(s, w) {
 			return true
 		}

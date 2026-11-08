@@ -33,7 +33,7 @@ func NewOneBot(wsURL, token string) *OneBot {
 
 func (o *OneBot) SetEventHandler(fn func(ev *core.Event)) { o.onEvent = fn }
 
-func (o *OneBot) Connect() error {
+func (o *OneBot) dial() (*websocket.Conn, error) {
 	hdr := map[string][]string{}
 	if o.token != "" {
 		hdr["Authorization"] = []string{"Bearer " + o.token}
@@ -41,22 +41,92 @@ func (o *OneBot) Connect() error {
 	d := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := d.Dial(o.wsURL, hdr)
 	if err != nil {
-		return fmt.Errorf("连接 %s 失败: %w", o.wsURL, err)
+		return nil, fmt.Errorf("连接 %s 失败: %w", o.wsURL, err)
 	}
+	return conn, nil
+}
+
+func (o *OneBot) Connect() error {
+	conn, err := o.dial()
+	if err != nil {
+		return err
+	}
+	o.mu.Lock()
 	o.conn = conn
+	o.mu.Unlock()
 	log.Printf("[adapter] 已连接 OneBot WS: %s", o.wsURL)
 	go o.readLoop()
 	return nil
 }
 
+// setConn 替换当前连接(重连时调用), 并作废所有挂起的 API 调用
+func (o *OneBot) setConn(conn *websocket.Conn) {
+	o.mu.Lock()
+	o.conn = conn
+	// 作废旧连接上挂起的 API 调用: close 让其立即失败, 而不是等 30s 超时
+	for echo, ch := range o.echoChans {
+		close(ch)
+		delete(o.echoChans, echo)
+	}
+	o.mu.Unlock()
+}
+
+func (o *OneBot) currentConn() *websocket.Conn {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.conn
+}
+
+func (o *OneBot) isClosed() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.closed
+}
+
+// reconnect 断线后指数退避重连, 直到成功或 Close; 返回 false 表示已关闭
+func (o *OneBot) reconnect() bool {
+	backoff := time.Second
+	for {
+		if o.isClosed() {
+			return false
+		}
+		log.Printf("[adapter] %v 后重连 OneBot WS: %s", backoff, o.wsURL)
+		time.Sleep(backoff)
+		if o.isClosed() {
+			return false
+		}
+		conn, err := o.dial()
+		if err != nil {
+			log.Printf("[adapter] 重连失败: %v", err)
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			continue
+		}
+		o.setConn(conn)
+		log.Printf("[adapter] 已重连 OneBot WS: %s", o.wsURL)
+		return true
+	}
+}
+
 func (o *OneBot) readLoop() {
 	for {
-		_, data, err := o.conn.ReadMessage()
-		if err != nil {
-			if !o.closed {
-				log.Printf("[adapter] WS 连接断开: %v", err)
-			}
+		conn := o.currentConn()
+		if conn == nil {
 			return
+		}
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			if o.isClosed() {
+				log.Printf("[adapter] WS 连接已关闭: %v", err)
+				return
+			}
+			log.Printf("[adapter] WS 连接断开: %v, 启动自动重连", err)
+			if !o.reconnect() {
+				return
+			}
+			continue
 		}
 		var probe struct {
 			Echo   string `json:"echo"`
@@ -81,9 +151,12 @@ func (o *OneBot) readLoop() {
 }
 
 func (o *OneBot) Close() error {
+	o.mu.Lock()
 	o.closed = true
-	if o.conn != nil {
-		return o.conn.Close()
+	conn := o.conn
+	o.mu.Unlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
@@ -95,12 +168,14 @@ type CallResult struct {
 }
 
 func (o *OneBot) Call(action string, params map[string]interface{}) (*CallResult, error) {
-	if o.conn == nil {
+	o.mu.Lock()
+	conn := o.conn
+	if conn == nil {
+		o.mu.Unlock()
 		return nil, errors.New("连接未建立")
 	}
 	echo := fmt.Sprintf("echo_%d", time.Now().UnixNano())
 	ch := make(chan json.RawMessage, 1)
-	o.mu.Lock()
 	o.echoChans[echo] = ch
 	o.mu.Unlock()
 
@@ -116,7 +191,7 @@ func (o *OneBot) Call(action string, params map[string]interface{}) (*CallResult
 		"echo":   echo,
 	}
 	o.mu.Lock()
-	err := o.conn.WriteJSON(msg)
+	err := conn.WriteJSON(msg)
 	o.mu.Unlock()
 	if err != nil {
 		return nil, err

@@ -43,8 +43,8 @@ func (s *Service) registerSchedTools() {
 }
 
 func (s *Service) scheduleCallback(ctx context.Context, args map[string]interface{}) (string, error) {
-	ev, ok := ctx.Value("event").(*core.Event)
-	if !ok || ev == nil || s.sched == nil {
+	ev := core.EventFrom(ctx)
+	if ev == nil || s.sched == nil {
 		return "定时功能不可用", nil
 	}
 	content, _ := args["content"].(string)
@@ -86,8 +86,8 @@ func (s *Service) scheduleCallback(ctx context.Context, args map[string]interfac
 }
 
 func (s *Service) listTasksCallback(ctx context.Context, args map[string]interface{}) (string, error) {
-	ev, ok := ctx.Value("event").(*core.Event)
-	if !ok || ev == nil || s.sched == nil {
+	ev := core.EventFrom(ctx)
+	if ev == nil || s.sched == nil {
 		return "定时功能不可用", nil
 	}
 	scope, gid, uid := s.sessionScope(ev)

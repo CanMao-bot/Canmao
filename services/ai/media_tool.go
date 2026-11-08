@@ -68,7 +68,7 @@ func (s *Service) generateImageCallback(ctx context.Context, args map[string]int
 		return "图片已生成但保存失败, URL: " + strings.Join(urls, "\n"), nil
 	}
 	// 发送图片到目标会话
-	if ev, ok := ctx.Value("event").(*core.Event); ok && ev != nil {
+	if ev := core.EventFrom(ctx); ev != nil {
 		var segs []core.Segment
 		for _, p := range paths {
 			segs = append(segs, core.ImageSegment(p))
@@ -142,7 +142,7 @@ func (s *Service) ttsTool(voice string) Tool {
 				return "✅ 语音已生成但保存失败: " + audioURL + "\n" + err.Error(), nil
 			}
 			// 发送到目标会话
-			if ev, ok := ctx.Value("event").(*core.Event); ok && ev != nil {
+			if ev := core.EventFrom(ctx); ev != nil {
 				msg := []core.Segment{core.RecordSegment(audioFile)}
 				var sendErr error
 				if ev.IsGroup() {
