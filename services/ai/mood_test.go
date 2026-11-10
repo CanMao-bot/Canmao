@@ -156,15 +156,19 @@ func TestMoodJudgeInterjectFallback(t *testing.T) {
 	st, _ := mood.New(dir)
 	bot := core.NewBot(&core.Config{})
 	mm := NewMoodManager(st, bot, 10)
-	// 不注入 LLM, 走心情概率回退(心情极高必然触发)
+	// 不注入 LLM, 走心情概率回退；心情100的触发概率为80%，允许静默。
 	st.Save(&mood.State{Value: 100, Emotion: "happy"})
 
 	res, err := mm.JudgeInterject(context.Background(), "随便聊聊", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Should || res.Mode != "chat" {
-		t.Fatalf("心情100时应回退触发, got %+v", res)
+	expectedMode := "silent"
+	if res.Should {
+		expectedMode = "chat"
+	}
+	if res.Mode != expectedMode {
+		t.Fatalf("概率回退应返回匹配的参与模式, got %+v", res)
 	}
 }
 

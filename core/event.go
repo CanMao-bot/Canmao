@@ -6,21 +6,21 @@ import (
 )
 
 type Event struct {
-	Type       string   `json:"post_type"`      // message / notice / request
-	DetailType string   `json:"message_type"`   // group / private
-	NoticeType string   `json:"notice_type"`    // group_increase ...
-	RequestType string  `json:"request_type"`   // friend / group
-	SubType    string   `json:"sub_type"`
-	SelfID     int64    `json:"self_id"`
-	UserID     int64    `json:"user_id"`
-	GroupID    int64    `json:"group_id"`
-	MessageID  int64    `json:"message_id"`
-	Message    []Segment `json:"message"`
-	RawMessage string   `json:"raw_message"`
-	OperatorID int64    `json:"operator_id"`
-	Comment    string   `json:"comment"`        // request 事件的验证信息/入群理由
-	Flag       string   `json:"flag"`           // request 事件的审批标识(set_group_add_request 用)
-	File       map[string]interface{} `json:"file"` // notice group_upload 的群文件信息
+	Type        string                 `json:"post_type"`    // message / notice / request
+	DetailType  string                 `json:"message_type"` // group / private
+	NoticeType  string                 `json:"notice_type"`  // group_increase ...
+	RequestType string                 `json:"request_type"` // friend / group
+	SubType     string                 `json:"sub_type"`
+	SelfID      int64                  `json:"self_id"`
+	UserID      int64                  `json:"user_id"`
+	GroupID     int64                  `json:"group_id"`
+	MessageID   int64                  `json:"message_id"`
+	Message     []Segment              `json:"message"`
+	RawMessage  string                 `json:"raw_message"`
+	OperatorID  int64                  `json:"operator_id"`
+	Comment     string                 `json:"comment"` // request 事件的验证信息/入群理由
+	Flag        string                 `json:"flag"`    // request 事件的审批标识(set_group_add_request 用)
+	File        map[string]interface{} `json:"file"`    // notice group_upload 的群文件信息
 }
 
 type Segment struct {
@@ -32,7 +32,7 @@ type Reply struct {
 	Message []Segment `json:"message"`
 }
 
-func (e *Event) IsGroup() bool  { return e.DetailType == "group" }
+func (e *Event) IsGroup() bool   { return e.DetailType == "group" }
 func (e *Event) IsPrivate() bool { return e.DetailType == "private" }
 
 // IsMentioned 判断消息是否 @ 了指定 QQ(或 @全体)
@@ -44,8 +44,13 @@ func (e *Event) IsMentioned(selfID int64) bool {
 		}
 		qq, ok := seg.Data["qq"].(string)
 		if !ok {
-			if f, ok := seg.Data["qq"].(float64); ok {
-				qq = fmt.Sprintf("%d", int64(f))
+			switch v := seg.Data["qq"].(type) {
+			case float64:
+				qq = fmt.Sprintf("%d", int64(v))
+			case int64:
+				qq = fmt.Sprintf("%d", v)
+			case int:
+				qq = fmt.Sprintf("%d", v)
 			}
 		}
 		if qq == self || qq == "all" {
@@ -64,8 +69,13 @@ func (e *Event) IsMentionedByUser(userID int64) bool {
 		}
 		qq, ok := seg.Data["qq"].(string)
 		if !ok {
-			if f, ok := seg.Data["qq"].(float64); ok {
-				qq = fmt.Sprintf("%d", int64(f))
+			switch v := seg.Data["qq"].(type) {
+			case float64:
+				qq = fmt.Sprintf("%d", int64(v))
+			case int64:
+				qq = fmt.Sprintf("%d", v)
+			case int:
+				qq = fmt.Sprintf("%d", v)
 			}
 		}
 		if qq == uid {
@@ -110,6 +120,10 @@ func (e *Event) AtQQs() []int64 {
 				qqs = append(qqs, id)
 			}
 		case float64:
+			qqs = append(qqs, int64(v))
+		case int64:
+			qqs = append(qqs, v)
+		case int:
 			qqs = append(qqs, int64(v))
 		}
 	}

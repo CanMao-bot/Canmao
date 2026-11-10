@@ -32,7 +32,7 @@ func NewShellTool() ai.Tool {
 			}
 			out, err := runShell(ctx, cmdStr, workdir, timeout)
 			if err != nil {
-				return out + "\n执行失败: " + err.Error(), nil
+				return out, err
 			}
 			return out, nil
 		})

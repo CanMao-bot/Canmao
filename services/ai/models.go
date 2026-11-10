@@ -28,49 +28,49 @@ type ModelInfo struct {
 // 内置已知模型上下文窗口 (token) 用于展示能力;
 // 实际列表一律从各 provider API 获取
 var knownContextWindows = map[string]int{
-	"deepseek-chat":     65536,
-	"deepseek-reasoner": 65536,
-	"deepseek-v3":       65536,
-	"deepseek-v4-flash":    131072,
+	"deepseek-chat":          65536,
+	"deepseek-reasoner":      65536,
+	"deepseek-v3":            65536,
+	"deepseek-v4-flash":      131072,
 	"deepseek-v4-flash-0731": 131072,
-	"deepseek-v4-pro":      131072,
-	"gpt-4o":            128000,
-	"gpt-4o-mini":       128000,
-	"gpt-4-turbo":       128000,
-	"gpt-4":             8192,
-	"gpt-3.5-turbo":     16385,
-	"claude-3-5-sonnet": 200000,
-	"claude-3-opus":     200000,
-	"claude-sonnet-4":   200000,
-	"claude-opus-4":     200000,
-	"qwen-max":            32768,
-	"qwen-plus":           131072,
-	"qwen-turbo":          1000000,
-	"qwen3.7-max":         131072,
-	"qwen3.7-plus":        131072,
-	"qwen3.6-flash":       131072,
-	"qwen3.8-max":         131072,
-	"glm-4":               128000,
-	"glm-4-plus":          128000,
-	"glm-5.2":             131072,
-	"wan2.7-image":        0,
-	"wan2.7-image-pro":    0,
-	"kimi-k2":           131072,
-	"kimi-k3":           1048576,
-	"moonshotai/kimi-k3": 1048576,
-	"moonshot-v1-32k":   32768,
-	"gemini-1.5-pro":    2097152,
-	"mistral-large":     32000,
-	"llama-3.1-405b":    131072,
+	"deepseek-v4-pro":        131072,
+	"gpt-4o":                 128000,
+	"gpt-4o-mini":            128000,
+	"gpt-4-turbo":            128000,
+	"gpt-4":                  8192,
+	"gpt-3.5-turbo":          16385,
+	"claude-3-5-sonnet":      200000,
+	"claude-3-opus":          200000,
+	"claude-sonnet-4":        200000,
+	"claude-opus-4":          200000,
+	"qwen-max":               32768,
+	"qwen-plus":              131072,
+	"qwen-turbo":             1000000,
+	"qwen3.7-max":            131072,
+	"qwen3.7-plus":           131072,
+	"qwen3.6-flash":          131072,
+	"qwen3.8-max":            131072,
+	"glm-4":                  128000,
+	"glm-4-plus":             128000,
+	"glm-5.2":                131072,
+	"wan2.7-image":           0,
+	"wan2.7-image-pro":       0,
+	"kimi-k2":                131072,
+	"kimi-k3":                1048576,
+	"moonshotai/kimi-k3":     1048576,
+	"moonshot-v1-32k":        32768,
+	"gemini-1.5-pro":         2097152,
+	"mistral-large":          32000,
+	"llama-3.1-405b":         131072,
 }
 
 // ModelRegistry 管理多个模型提供商与当前模型
 type ModelRegistry struct {
-	mu      sync.RWMutex
-	store   *provider.Store
-	group   *group.Store
-	cfg     *core.AIConfig
-	http    *http.Client
+	mu    sync.RWMutex
+	store *provider.Store
+	group *group.Store
+	cfg   *core.AIConfig
+	http  *http.Client
 	// 已拉取的各 provider 模型列表
 	modelsCache map[string][]ModelInfo
 	// 各 provider 当前模型
@@ -121,6 +121,23 @@ func (r *ModelRegistry) ModelForLevel(level userLevel) string {
 		return ""
 	}
 	return p.Model
+}
+
+// pinForLevel 只读取一次当前 provider，将模型、连接参数和预算绑定到同一快照。
+func (r *ModelRegistry) pinForLevel(ctx context.Context, level userLevel) (context.Context, error) {
+	p, err := r.CurrentProvider()
+	if err != nil {
+		return ctx, err
+	}
+	r.mu.RLock()
+	model := r.groupModels[levelKey(level)]
+	r.mu.RUnlock()
+	if model == "" {
+		model = p.Model
+	}
+	window := r.windowForProvider(p.Name, p.Model, model)
+	ctx = WithModelOverride(ctx, model)
+	return context.WithValue(ctx, endpointKey{}, requestEndpoint{p.BaseURL, p.APIKey, model, p.Proxy, window}), nil
 }
 
 // SetGroupModel 为用户组设置默认模型
@@ -347,7 +364,8 @@ func (r *ModelRegistry) SetProviderProxy(name, proxy string) error {
 }
 
 // SwitchProvider 切换当前提供商
-func (r *ModelRegistry) SwitchProvider(name string) error {	if r.store == nil {
+func (r *ModelRegistry) SwitchProvider(name string) error {
+	if r.store == nil {
 		return fmt.Errorf("provider store 未初始化")
 	}
 	d, err := r.store.Load()
@@ -417,15 +435,45 @@ func (r *ModelRegistry) SetCurrentModel(id string) error {
 func (r *ModelRegistry) ContextWindow() int {
 	p, err := r.CurrentProvider()
 	if err != nil {
-		return 64000
+		return r.contextWindowFor("", "")
 	}
+	return r.contextWindowFor(p.Name, p.Model)
+}
+
+func (r *ModelRegistry) ContextWindowFor(model string) int {
+	p, err := r.CurrentProvider()
+	if err != nil {
+		return r.contextWindowFor("", model)
+	}
+	if model == "" {
+		model = p.Model
+	}
+	return r.windowForProvider(p.Name, p.Model, model)
+}
+
+func (r *ModelRegistry) windowForProvider(name, defaultModel, model string) int {
+	if model != defaultModel {
+		r.mu.RLock()
+		for _, m := range r.modelsCache[name] {
+			if m.ID == model && m.ContextWindow > 0 {
+				r.mu.RUnlock()
+				return m.ContextWindow
+			}
+		}
+		r.mu.RUnlock()
+		return r.contextWindowFor("", model)
+	}
+	return r.contextWindowFor(name, model)
+}
+
+func (r *ModelRegistry) contextWindowFor(providerName, model string) int {
 	r.mu.RLock()
-	if w, ok := r.ctxByProvider[p.Name]; ok {
+	if w, ok := r.ctxByProvider[providerName]; ok && w > 0 {
 		r.mu.RUnlock()
 		return w
 	}
 	r.mu.RUnlock()
-	if w, ok := knownContextWindows[strings.ToLower(p.Model)]; ok {
+	if w, ok := knownContextWindows[strings.ToLower(model)]; ok && w > 0 {
 		return w
 	}
 	if r.cfg != nil && r.cfg.ContextWindow > 0 {

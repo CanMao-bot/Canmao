@@ -20,10 +20,10 @@ func TestEstimateTokens(t *testing.T) {
 		in   string
 		want int
 	}{
-		{"你好世界", 4},                                  // 4 个中文字 = 4
-		{"hello world", 2},                              // 11 字符 / 4 = 2
-		{"", 0},                                         // 空
-		{"你好 hello 世界 world", 4 + 13/4},               // 4 + 3
+		{"你好世界", 4},                     // 4 个中文字 = 4
+		{"hello world", 2},              // 11 字符 / 4 = 2
+		{"", 0},                         // 空
+		{"你好 hello 世界 world", 4 + 13/4}, // 4 + 3
 	}
 	for _, c := range cases {
 		got := estimateTokens(c.in)
@@ -97,17 +97,17 @@ func TestCompactThreshold(t *testing.T) {
 	if svc.compactThreshold() != 9999 {
 		t.Fatalf("compactThreshold = %d, want 9999", svc.compactThreshold())
 	}
-	// 未显式配置 CompactToken 时按上下文窗口的 95%
+	// 压缩在 70% 执行预算的 80% 启动，早于硬限制。
 	cfg2 := coreCfgDefault() // MaxTokens=2048, ContextWindow=0 -> 默认 64000
 	svc2 := &Service{cfg: cfg2, models: NewModelRegistry(&cfg2.AI)}
-	if svc2.compactThreshold() != 60800 {
-		t.Fatalf("compactThreshold = %d, want 60800 (64000*95%%)", svc2.compactThreshold())
+	if svc2.compactThreshold() != 35840 {
+		t.Fatalf("compactThreshold = %d, want 35840", svc2.compactThreshold())
 	}
 	// 显式上下文窗口
 	cfg3 := &core.Config{AI: core.AIConfig{ContextWindow: 128000}}
 	svc3 := &Service{cfg: cfg3, models: NewModelRegistry(&cfg3.AI)}
-	if svc3.compactThreshold() != 121600 {
-		t.Fatalf("compactThreshold = %d, want 121600 (128000*95%%)", svc3.compactThreshold())
+	if svc3.compactThreshold() != 71680 {
+		t.Fatalf("compactThreshold = %d, want 71680", svc3.compactThreshold())
 	}
 	// 切换到已知模型自动更新上下文窗口
 	cfg4 := &core.Config{AI: core.AIConfig{ContextWindow: 64000}}

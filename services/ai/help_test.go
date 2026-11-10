@@ -39,6 +39,9 @@ func TestRenderHelpLevels(t *testing.T) {
 	if strings.Contains(admin, "主人专属") {
 		t.Fatal("管理员帮助不应含主人专属")
 	}
+	if strings.Contains(admin, "/ai on") || strings.Contains(admin, "/ai off") {
+		t.Fatal("管理员帮助不应提供主人专属群AI开关")
+	}
 
 	master := svc.renderHelp(levelMaster)
 	if !strings.Contains(master, "主人专属") {
@@ -49,6 +52,9 @@ func TestRenderHelpLevels(t *testing.T) {
 	}
 	if !strings.Contains(master, "/grant") {
 		t.Fatal("主人帮助应含 grant 命令")
+	}
+	if !strings.Contains(master, "/ai on") || !strings.Contains(master, "/ai settings") {
+		t.Fatal("主人帮助缺少群AI独立设置")
 	}
 }
 

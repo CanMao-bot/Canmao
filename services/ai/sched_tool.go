@@ -15,10 +15,10 @@ import (
 func (s *Service) registerSchedTools() {
 	t := NewTool("schedule_task", "设置一个定时任务, 到时间自动发送消息提醒。支持一次性或重复(每隔N秒/分钟/小时)。例如: 10分钟后提醒我喝水, 每天上午9点发早安。",
 		map[string]*ToolParam{
-			"content":   {Type: "string", Description: "定时要发送的内容"},
-			"delay_sec": {Type: "integer", Description: "多少秒后触发(一次性任务, 与 repeat_sec 二选一)"},
+			"content":    {Type: "string", Description: "定时要发送的内容"},
+			"delay_sec":  {Type: "integer", Description: "多少秒后触发(一次性任务, 与 repeat_sec 二选一)"},
 			"repeat_sec": {Type: "integer", Description: "重复间隔秒数(重复任务, 与 delay_sec 二选一)"},
-			"target":    {Type: "string", Description: "目标: group=发到当前群 / private=发到当前私聊(可选, 默认当前会话)"},
+			"target":     {Type: "string", Description: "目标: group=发到当前群 / private=发到当前私聊(可选, 默认当前会话)"},
 		},
 		[]string{"content"},
 		s.scheduleCallback,
@@ -115,14 +115,16 @@ func (s *Service) listTasksCallback(ctx context.Context, args map[string]interfa
 }
 
 func (s *Service) cancelTaskCallback(ctx context.Context, args map[string]interface{}) (string, error) {
-	if s.sched == nil {
+	ev := core.EventFrom(ctx)
+	if s.sched == nil || ev == nil {
 		return "定时功能不可用", nil
 	}
 	id, _ := args["task_id"].(float64)
 	if id <= 0 {
 		return "错误: 请提供 task_id", nil
 	}
-	if err := s.sched.Disable(int64(id)); err != nil {
+	scope, gid, uid := s.sessionScope(ev)
+	if err := s.sched.DisableScoped(int64(id), scope, gid, uid); err != nil {
 		return "取消失败: " + err.Error(), nil
 	}
 	return "✅ 已取消定时任务 #" + strconv.FormatInt(int64(id), 10), nil
@@ -176,7 +178,8 @@ func (s *Service) handleSchedCmd(ctx context.Context, bot *core.Bot, ev *core.Ev
 			bot.Reply(ev, "用法: /sched cancel <任务ID>")
 			return true
 		}
-		if err := s.sched.Disable(id); err != nil {
+		scope, gid, uid := s.sessionScope(ev)
+		if err := s.sched.DisableScoped(id, scope, gid, uid); err != nil {
 			bot.Reply(ev, "取消失败: "+err.Error())
 			return true
 		}

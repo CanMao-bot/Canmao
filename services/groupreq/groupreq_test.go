@@ -42,14 +42,14 @@ func (f *fakeSender) GetStrangerInfo(userID int64) (map[string]interface{}, erro
 	return map[string]interface{}{"nickname": f.strangers[userID]}, nil
 }
 
-func (f *fakeSender) SetGroupBan(groupID, userID int64, duration int) error    { return nil }
-func (f *fakeSender) SetGroupWholeBan(groupID int64, enable bool) error        { return nil }
-func (f *fakeSender) SetGroupKick(groupID, userID int64, reject bool) error    { return nil }
-func (f *fakeSender) SetGroupAdmin(groupID, userID int64, enable bool) error   { return nil }
-func (f *fakeSender) SetGroupCard(groupID, userID int64, card string) error    { return nil }
-func (f *fakeSender) SetGroupName(groupID int64, name string) error            { return nil }
-func (f *fakeSender) SetGroupLeave(groupID int64, isDismiss bool) error        { return nil }
-func (f *fakeSender) SendGroupNotice(groupID int64, content string) error      { return nil }
+func (f *fakeSender) SetGroupBan(groupID, userID int64, duration int) error  { return nil }
+func (f *fakeSender) SetGroupWholeBan(groupID int64, enable bool) error      { return nil }
+func (f *fakeSender) SetGroupKick(groupID, userID int64, reject bool) error  { return nil }
+func (f *fakeSender) SetGroupAdmin(groupID, userID int64, enable bool) error { return nil }
+func (f *fakeSender) SetGroupCard(groupID, userID int64, card string) error  { return nil }
+func (f *fakeSender) SetGroupName(groupID int64, name string) error          { return nil }
+func (f *fakeSender) SetGroupLeave(groupID int64, isDismiss bool) error      { return nil }
+func (f *fakeSender) SendGroupNotice(groupID int64, content string) error    { return nil }
 func (f *fakeSender) GetGroupMemberList(groupID int64) ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -73,6 +73,7 @@ func newTestManager(t *testing.T) (*Manager, *core.Bot, *fakeSender) {
 		t.Fatal(err)
 	}
 	pst.SetGroupBot(123, true) // 群默认关闭, 先启用
+	t.Cleanup(func() { pst.Close(); bot.Shutdown() })
 	return New(bot, pst), bot, fs
 }
 
@@ -206,6 +207,7 @@ func TestListRequests(t *testing.T) {
 func TestDisabledGroupSilent(t *testing.T) {
 	m, bot, fs := newTestManager(t)
 	pst, _ := perm.New(t.TempDir())
+	t.Cleanup(func() { pst.Close() })
 	pst.SetGroupBot(123, false)
 	m.perm = pst
 	if !m.Handle(context.Background(), bot, requestEvent()) {

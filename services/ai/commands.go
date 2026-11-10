@@ -10,7 +10,6 @@ import (
 
 	"gobot/core"
 	"gobot/store/provider"
-	"gobot/store/session"
 )
 
 func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Event, isMaster bool) (handled, done bool) {
@@ -22,6 +21,8 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 	if !ev.IsGroup() {
 		// 私聊也支持会话/压缩命令
 		switch cmd {
+		case "/ai":
+			return true, s.handleGroupAICommand(bot, ev, arg)
 		case "/help", "/帮助":
 			return true, s.handleHelp(ctx, bot, ev, isMaster)
 		case "/compact", "/压缩":
@@ -77,36 +78,7 @@ func (s *Service) handleCommands(ctx context.Context, bot *core.Bot, ev *core.Ev
 		}
 		return true, true
 	case "/ai":
-		role, _ := s.perm.GetGroupRole(ev.GroupID, ev.UserID)
-		canAdmin := isMaster || role == "admin" || isAdmin(bot, ev.UserID)
-		switch arg {
-		case "on", "开", "":
-			if canAdmin {
-				s.perm.SetGroupAI(ev.GroupID, true)
-				bot.Reply(ev, "已开启本群 AI 功能")
-			} else if !silent {
-				bot.Reply(ev, "无权限")
-			}
-			return true, true
-		case "off", "关":
-			if canAdmin {
-				s.perm.SetGroupAI(ev.GroupID, false)
-				bot.Reply(ev, "已关闭本群 AI 功能")
-			} else if !silent {
-				bot.Reply(ev, "无权限")
-			}
-			return true, true
-		case "status":
-			on := s.perm.GroupEnabled(ev.GroupID)
-			state := "开启"
-			if !on {
-				state = "关闭"
-			}
-			bot.Reply(ev, "本群 AI 状态: "+state)
-			return true, true
-		}
-		bot.Reply(ev, "用法: /ai on | /ai off | /ai status")
-		return true, true
+		return true, s.handleGroupAICommand(bot, ev, arg)
 	case "/compact", "/压缩":
 		return true, s.handleCompact(ctx, bot, ev)
 	case "/new", "/新会话":
@@ -168,8 +140,10 @@ func (s *Service) handleClearSession(bot *core.Bot, ev *core.Event) bool {
 		bot.Reply(ev, "清除失败: "+err.Error())
 		return true
 	}
-	s.session.ReplaceMessages(ses.ID, []session.Message{})
-	s.session.SetSummary(ses.ID, "")
+	if err := s.session.Clear(ses.ID); err != nil {
+		bot.Reply(ev, "清除失败: "+err.Error())
+		return true
+	}
 	bot.Reply(ev, "已清除当前会话上下文")
 	return true
 }
@@ -222,7 +196,7 @@ func (s *Service) handleResumeSession(bot *core.Bot, ev *core.Event, arg string)
 		return true
 	}
 	scope, gid, uid := s.sessionScope(ev)
-	ses, err := s.session.Get(id)
+	ses, err := s.session.GetScoped(id, scope, gid, uid)
 	if err != nil || ses == nil {
 		bot.Reply(ev, "会话不存在")
 		return true
@@ -265,7 +239,8 @@ func (s *Service) handleDeleteSession(bot *core.Bot, ev *core.Event, arg string)
 		bot.Reply(ev, "用法: /delete <会话编号>")
 		return true
 	}
-	if err := s.session.Delete(id); err != nil {
+	scope, gid, uid := s.sessionScope(ev)
+	if err := s.session.DeleteScoped(id, scope, gid, uid); err != nil {
 		bot.Reply(ev, "删除失败: "+err.Error())
 		return true
 	}

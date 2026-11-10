@@ -92,12 +92,15 @@ func TestCanApprove(t *testing.T) {
 		t.Errorf("极危操作主人不可批准: %v", err)
 	}
 
-	// 高风险: 主人/管理员/发起人
+	// 高风险: 仅主人/管理员，发起人不能自批。
 	req = mkReq(RiskHigh, 20000)
-	for _, uid := range []int64{10000, 20000, 30000} {
+	for _, uid := range []int64{10000, 30000} {
 		if _, err := m.canApprove(req, mkEv(uid)); err != nil {
 			t.Errorf("高风险 uid=%d 不可批准: %v", uid, err)
 		}
+	}
+	if _, err := m.canApprove(req, mkEv(20000)); err == nil {
+		t.Fatal("高风险发起人不得自行批准")
 	}
 
 	// 中风险: 发起人/主人可, 旁观者不可

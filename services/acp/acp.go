@@ -12,37 +12,37 @@ import (
 	"time"
 )
 
-// Config ACP client 配置
-type Config struct {
-	Binary string // opencode 二进制路径, 默认 "opencode"
-	Cwd    string // 工作目录
+type Config struct{ Binary, Cwd string }
+
+type taskStream struct {
+	mu   sync.Mutex
+	text strings.Builder
+	err  error
 }
 
-// Client ACP 客户端(stdio JSON-RPC)
 type Client struct {
-	cfg    Config
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	reader *bufio.Scanner
-	// 消息分发
-	mu       sync.Mutex
-	seq      int
-	pending  map[int]chan json.RawMessage
-	notifyCh chan json.RawMessage
+	cfg       Config
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	reader    *bufio.Scanner
+	mu        sync.Mutex
+	writeGate chan struct{}
+	seq       int
+	pending   map[int]chan json.RawMessage
+	streams   map[string]*taskStream
+	notifyCh  chan json.RawMessage
+	done      chan struct{}
+	stopOnce  sync.Once
+	readErr   error
 }
 
 func New(cfg Config) *Client {
 	if cfg.Binary == "" {
 		cfg.Binary = "opencode"
 	}
-	return &Client{
-		cfg:      cfg,
-		pending:  map[int]chan json.RawMessage{},
-		notifyCh: make(chan json.RawMessage, 256),
-	}
+	return &Client{cfg: cfg, pending: make(map[int]chan json.RawMessage), streams: make(map[string]*taskStream), notifyCh: make(chan json.RawMessage, 256), done: make(chan struct{}), writeGate: make(chan struct{}, 1)}
 }
 
-// Start 启动 opencode acp 子进程并初始化
 func (c *Client) Start(ctx context.Context) error {
 	args := []string{"acp"}
 	if c.cfg.Cwd != "" {
@@ -55,279 +55,327 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		stdin.Close()
 		return err
 	}
-	// stderr 用于日志, 忽略或转发
-	if err := cmd.Start(); err != nil {
+	if err = cmd.Start(); err != nil {
+		stdin.Close()
+		stdout.Close()
 		return fmt.Errorf("启动 opencode acp: %w", err)
 	}
-	c.cmd = cmd
-	c.stdin = stdin
+	c.cmd, c.stdin = cmd, stdin
 	c.reader = bufio.NewScanner(stdout)
-	c.reader.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-
-	go c.readLoop()
-
-	// 初始化
-	if _, err := c.call(ctx, "initialize", map[string]interface{}{
-		"protocolVersion": 1,
-		"clientCapabilities": map[string]interface{}{
-			"fs":       map[string]interface{}{"readTextFile": false, "writeTextFile": false},
-			"terminal": false,
-		},
+	c.reader.Buffer(make([]byte, 64<<10), 16<<20)
+	go func() { c.readLoop(); _ = cmd.Wait() }()
+	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	_, err = c.call(initCtx, "initialize", map[string]interface{}{
+		"protocolVersion": 1, "clientCapabilities": map[string]interface{}{"fs": map[string]interface{}{"readTextFile": false, "writeTextFile": false}, "terminal": false},
 		"clientInfo": map[string]interface{}{"name": "gobot", "version": "1.0.0"},
-	}); err != nil {
+	})
+	if err != nil {
+		c.Close()
 		return fmt.Errorf("ACP 初始化失败: %w", err)
 	}
 	return nil
 }
 
-// Close 关闭会话与进程
+func (c *Client) stop(err error) {
+	c.stopOnce.Do(func() { c.mu.Lock(); c.readErr = err; c.mu.Unlock(); close(c.done) })
+}
+
 func (c *Client) Close() {
+	c.stop(io.EOF)
 	if c.stdin != nil {
-		c.stdin.Close()
+		_ = c.stdin.Close()
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
+		_ = c.cmd.Process.Kill()
 	}
 }
 
-// readLoop 读取子进程 stdout 的 NDJSON 消息
 func (c *Client) readLoop() {
+	defer func() {
+		err := c.reader.Err()
+		if err == nil {
+			err = io.EOF
+		}
+		c.stop(err)
+	}()
 	for c.reader.Scan() {
-		line := c.reader.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
+		line := append(json.RawMessage(nil), c.reader.Bytes()...)
 		var msg map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
-		// 响应(有 id) 或 请求(有 method+id) 或 通知(有 method 无 id)
-		if idRaw, ok := msg["id"]; ok {
-			var id int
-			if err := json.Unmarshal(idRaw, &id); err != nil {
+		// method 优先：服务端请求的 ID 与客户端 pending ID 属于不同方向。
+		if raw, ok := msg["method"]; ok {
+			var method string
+			if json.Unmarshal(raw, &method) != nil {
 				continue
 			}
-			c.mu.Lock()
-			if ch, ok := c.pending[id]; ok {
-				ch <- json.RawMessage(line)
-			}
-			c.mu.Unlock()
-		} else if methodRaw, ok := msg["method"]; ok {
-			// 服务端主动请求(需响应)或通知
-			var method string
-			json.Unmarshal(methodRaw, &method)
 			if isRequest(msg) {
-				// 服务端请求需应答
-				go c.handleServerRequest(method, json.RawMessage(line))
+				c.handleServerRequest(method, line)
 			} else {
-				select {
-				case c.notifyCh <- json.RawMessage(line):
-				default:
-				}
+				c.routeNotification(line)
+			}
+			continue
+		}
+		var id int
+		if json.Unmarshal(msg["id"], &id) != nil {
+			continue
+		}
+		c.mu.Lock()
+		ch := c.pending[id]
+		c.mu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- line:
+			default:
 			}
 		}
 	}
 }
 
-// isRequest 判断服务端消息是否为需要响应的请求(有 id 且有 method)
 func isRequest(msg map[string]json.RawMessage) bool {
-	_, hasID := msg["id"]
-	_, hasMethod := msg["method"]
-	return hasID && hasMethod
+	_, id := msg["id"]
+	_, method := msg["method"]
+	return id && method
 }
 
-// handleServerRequest 应答服务端请求(权限等)
 func (c *Client) handleServerRequest(method string, raw json.RawMessage) {
-	// 解析 id
-	var m struct {
-		ID int `json:"id"`
+	var req struct {
+		ID json.RawMessage `json:"id"`
 	}
-	json.Unmarshal(raw, &m)
-
-	var result interface{}
-	switch method {
-	case "session/request_permission":
-		// 默认拒绝权限请求
-		result = map[string]interface{}{"outcome": "reject"}
-	default:
-		result = map[string]interface{}{}
+	if json.Unmarshal(raw, &req) != nil {
+		return
 	}
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      m.ID,
-		"result":  result,
+	resp := map[string]interface{}{"jsonrpc": "2.0", "id": req.ID}
+	if method == "session/request_permission" {
+		// 不代替用户选择 allow 选项，按 ACP 的 outcome 判别字段明确取消。
+		resp["result"] = map[string]interface{}{"outcome": map[string]interface{}{"outcome": "cancelled"}}
+	} else {
+		resp["error"] = map[string]interface{}{"code": -32601, "message": "Unsupported client method"}
 	}
-	c.send(resp)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.send(ctx, resp)
 }
 
-// NextNotification 读取下一条通知(带超时)
+func (c *Client) routeNotification(raw json.RawMessage) {
+	var n struct {
+		Params struct {
+			SessionID string `json:"sessionId"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(raw, &n) != nil {
+		return
+	}
+	c.mu.Lock()
+	stream := c.streams[n.Params.SessionID]
+	c.mu.Unlock()
+	if stream != nil {
+		text := extractMessageText(raw)
+		stream.mu.Lock()
+		if stream.text.Len()+len(text) > 8<<20 {
+			stream.err = fmt.Errorf("opencode 输出超过8MB")
+		} else if stream.err == nil {
+			stream.text.WriteString(text)
+		}
+		stream.mu.Unlock()
+	}
+	select {
+	case c.notifyCh <- raw:
+	default:
+	} // 只用于可选监视器；任务输出从不经此队列竞争。
+}
+
 func (c *Client) NextNotification(timeout time.Duration) (json.RawMessage, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case n := <-c.notifyCh:
 		return n, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil, fmt.Errorf("等待通知超时")
+	case <-c.done:
+		return nil, c.closedError()
 	}
 }
 
-// call 发送 JSON-RPC 请求并等待响应
+func (c *Client) closedError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.readErr != nil {
+		return c.readErr
+	}
+	return io.EOF
+}
+
+func rpcError(raw json.RawMessage) error {
+	var response struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return err
+	}
+	if response.Error != nil {
+		return fmt.Errorf("ACP RPC %d: %s", response.Error.Code, response.Error.Message)
+	}
+	if len(response.Result) == 0 {
+		return fmt.Errorf("ACP 响应缺少 result")
+	}
+	return nil
+}
+
 func (c *Client) call(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	c.seq++
 	id := c.seq
 	ch := make(chan json.RawMessage, 1)
 	c.pending[id] = ch
 	c.mu.Unlock()
-
-	defer func() {
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-	}()
-
-	req := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  method,
-		"params":  params,
-	}
-	if err := c.send(req); err != nil {
+	defer func() { c.mu.Lock(); delete(c.pending, id); c.mu.Unlock() }()
+	if err := c.send(ctx, map[string]interface{}{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		return nil, err
 	}
-
 	select {
 	case resp := <-ch:
-		return resp, nil
+		return resp, rpcError(resp)
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	}
-}
-
-func (c *Client) send(msg interface{}) error {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.stdin.Write(append(data, '\n')); err != nil {
-		return err
-	}
-	return nil
-}
-
-// RunTask 执行一次完整任务: 创建会话 → 发消息 → 收集回复 → 关闭
-// 返回 agent 的最终文本回复
-func (c *Client) RunTask(ctx context.Context, cwd, prompt string, timeout time.Duration) (string, error) {
-	// 创建会话
-	resp, err := c.call(ctx, "session/new", map[string]interface{}{
-		"cwd":        cwd,
-		"mcpServers": []interface{}{},
-	})
-	if err != nil {
-		return "", err
-	}
-	var newResp struct {
-		Result struct {
-			SessionID string `json:"sessionId"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &newResp); err != nil {
-		return "", fmt.Errorf("解析 session/new 响应: %w", err)
-	}
-	sessionID := newResp.Result.SessionID
-	if sessionID == "" {
-		return "", fmt.Errorf("session/new 未返回 sessionId: %s", string(resp))
-	}
-	defer func() {
-		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		c.call(cctx, "session/close", map[string]interface{}{"sessionId": sessionID})
-	}()
-
-	// 发送 prompt
-	promptResp := make(chan json.RawMessage, 1)
-	c.mu.Lock()
-	c.seq++
-	pid := c.seq
-	ch := make(chan json.RawMessage, 1)
-	c.pending[pid] = ch
-	c.mu.Unlock()
-	defer func() {
-		c.mu.Lock()
-		delete(c.pending, pid)
-		c.mu.Unlock()
-	}()
-
-	req := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      pid,
-		"method":  "session/prompt",
-		"params": map[string]interface{}{
-			"sessionId": sessionID,
-			"prompt":    []map[string]interface{}{{"type": "text", "text": prompt}},
-		},
-	}
-	if err := c.send(req); err != nil {
-		return "", err
-	}
-
-	// 收集文本回复: 处理通知直到收到 prompt 响应
-	var reply strings.Builder
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-
-	// 同时监听通知流和 prompt 响应
-	for {
+	case <-c.done:
 		select {
-		case <-deadline.C:
-			return strings.TrimSpace(reply.String()), fmt.Errorf("opencode 任务超时(%v)", timeout)
-		case <-ctx.Done():
-			return strings.TrimSpace(reply.String()), ctx.Err()
 		case resp := <-ch:
-			// prompt 完成
-			var r struct {
-				Result struct {
-					StopReason string `json:"stopReason"`
-				} `json:"result"`
-			}
-			_ = json.Unmarshal(resp, &r)
-			_ = promptResp
-			return strings.TrimSpace(reply.String()), nil
-		case n := <-c.notifyCh:
-			text := extractMessageText(n)
-			if text != "" {
-				reply.WriteString(text)
-			}
+			return resp, rpcError(resp)
+		default:
+			return nil, c.closedError()
 		}
 	}
 }
 
-// extractMessageText 从 session/update 通知提取文本增量
+func (c *Client) send(ctx context.Context, msg interface{}) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.writeGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return c.closedError()
+	}
+	defer func() { <-c.writeGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-c.done:
+		return c.closedError()
+	default:
+	}
+	if c.stdin == nil {
+		return fmt.Errorf("ACP 尚未连接")
+	}
+	written := make(chan error, 1)
+	go func() { _, writeErr := c.stdin.Write(append(data, '\n')); written <- writeErr }()
+	select {
+	case err := <-written:
+		return err
+	case <-ctx.Done():
+		// 半写入会破坏 JSON-RPC 帧，关闭失去响应的传输，避免后台继续执行。
+		c.stop(ctx.Err())
+		_ = c.stdin.Close()
+		return ctx.Err()
+	case <-c.done:
+		_ = c.stdin.Close()
+		return c.closedError()
+	}
+}
+
+func (c *Client) RunTask(ctx context.Context, cwd, prompt string, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resp, err := c.call(ctx, "session/new", map[string]interface{}{"cwd": cwd, "mcpServers": []interface{}{}})
+	if err != nil {
+		return "", err
+	}
+	var created struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	if err = json.Unmarshal(resp, &created); err != nil {
+		return "", err
+	}
+	id := created.Result.SessionID
+	if id == "" {
+		return "", fmt.Errorf("session/new 未返回 sessionId")
+	}
+	stream := &taskStream{}
+	c.mu.Lock()
+	if _, exists := c.streams[id]; exists {
+		c.mu.Unlock()
+		return "", fmt.Errorf("ACP 返回了正在使用的 sessionId")
+	}
+	c.streams[id] = stream
+	c.mu.Unlock()
+	defer func() { c.mu.Lock(); delete(c.streams, id); c.mu.Unlock() }()
+	resp, err = c.call(ctx, "session/prompt", map[string]interface{}{"sessionId": id, "prompt": []map[string]interface{}{{"type": "text", "text": prompt}}})
+	if ctx.Err() != nil {
+		// session/cancel 是通知，不等待不存在的 session/close RPC。
+		cancelCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		_ = c.send(cancelCtx, map[string]interface{}{"jsonrpc": "2.0", "method": "session/cancel", "params": map[string]interface{}{"sessionId": id}})
+		stop()
+	}
+	stream.mu.Lock()
+	reply, streamErr := strings.TrimSpace(stream.text.String()), stream.err
+	stream.mu.Unlock()
+	if err != nil {
+		return reply, err
+	}
+	if streamErr != nil {
+		return reply, streamErr
+	}
+	var done struct {
+		Result struct {
+			StopReason string `json:"stopReason"`
+		} `json:"result"`
+	}
+	if err = json.Unmarshal(resp, &done); err != nil {
+		return reply, err
+	}
+	if done.Result.StopReason != "end_turn" {
+		return reply, fmt.Errorf("opencode 未正常完成: %s", done.Result.StopReason)
+	}
+	return reply, nil
+}
+
 func extractMessageText(raw json.RawMessage) string {
 	var n struct {
 		Method string `json:"method"`
 		Params struct {
 			Update struct {
-				SessionUpdate string `json:"sessionUpdate"`
-				MessageID     string `json:"messageId"`
-				Content       struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
+				SessionUpdate string                      `json:"sessionUpdate"`
+				Content       struct{ Type, Text string } `json:"content"`
 			} `json:"update"`
 		} `json:"params"`
 	}
-	if err := json.Unmarshal(raw, &n); err != nil {
+	if json.Unmarshal(raw, &n) != nil {
 		return ""
 	}
-	if n.Method != "session/update" {
-		return ""
-	}
-	if n.Params.Update.SessionUpdate == "agent_message_chunk" &&
-		n.Params.Update.Content.Type == "text" {
+	if n.Method == "session/update" && n.Params.Update.SessionUpdate == "agent_message_chunk" && n.Params.Update.Content.Type == "text" {
 		return n.Params.Update.Content.Text
 	}
 	return ""

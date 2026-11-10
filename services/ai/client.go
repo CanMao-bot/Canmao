@@ -14,9 +14,9 @@ import (
 )
 
 type ToolParam struct {
-	Type        string                `json:"type"`
-	Description string                `json:"description,omitempty"`
-	Enum        []string              `json:"enum,omitempty"`
+	Type        string                 `json:"type"`
+	Description string                 `json:"description,omitempty"`
+	Enum        []string               `json:"enum,omitempty"`
 	Items       map[string]interface{} `json:"items,omitempty"`
 }
 
@@ -24,13 +24,24 @@ type ToolParameters struct {
 	Type       string                `json:"type"`
 	Properties map[string]*ToolParam `json:"properties,omitempty"`
 	Required   []string              `json:"required,omitempty"`
+	Raw        json.RawMessage       `json:"-"` // MCP 等外部工具保留完整 Schema。
+}
+
+func (p ToolParameters) MarshalJSON() ([]byte, error) {
+	if len(p.Raw) > 0 {
+		return p.Raw, nil
+	}
+	type plain ToolParameters
+	return json.Marshal(plain(p))
 }
 
 type Tool struct {
-	Type     string        `json:"type"`
-	Function ToolFunction  `json:"function"`
-	Risk     RiskLevel     `json:"-"`
-	Callback func(ctx context.Context, args map[string]interface{}) (string, error) `json:"-"`
+	Type      string                                                                 `json:"type"`
+	Function  ToolFunction                                                           `json:"function"`
+	Risk      RiskLevel                                                              `json:"-"`
+	Authorize func(context.Context, map[string]interface{}) error                    `json:"-"`
+	Timeout   time.Duration                                                          `json:"-"`
+	Callback  func(ctx context.Context, args map[string]interface{}) (string, error) `json:"-"`
 }
 
 type ToolFunction struct {
@@ -59,17 +70,17 @@ func NewTool(name, desc string, params map[string]*ToolParam, required []string,
 }
 
 type Message struct {
-	Role       string        `json:"role"`
-	Content    interface{}   `json:"content,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 }
 
 // ContentPart 多模态消息内容片段
 type ContentPart struct {
-	Type     string         `json:"type"` // text / image_url
-	Text     string         `json:"text,omitempty"`
-	ImageURL *ImageURLPart  `json:"image_url,omitempty"`
+	Type     string        `json:"type"` // text / image_url
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ImageURLPart `json:"image_url,omitempty"`
 }
 
 type ImageURLPart struct {
@@ -103,6 +114,17 @@ func (m Message) TextContent() string {
 		for _, p := range c {
 			if p.Type == "text" {
 				b.WriteString(p.Text)
+			}
+		}
+		return b.String()
+	case []interface{}:
+		// interface{} content decoded from a compatible API becomes JSON objects.
+		var b strings.Builder
+		for _, part := range c {
+			if p, ok := part.(map[string]interface{}); ok && p["type"] == "text" {
+				if text, ok := p["text"].(string); ok {
+					b.WriteString(text)
+				}
 			}
 		}
 		return b.String()
@@ -162,6 +184,20 @@ func (c *Client) endpoint() (string, string, string, string) {
 
 type ctxModelKey struct{}
 
+type requestEndpoint struct {
+	BaseURL, APIKey, Model, Proxy string
+	Window                        int
+}
+type endpointKey struct{}
+
+func (c *Client) pin(ctx context.Context, window int) context.Context {
+	base, key, model, proxy := c.endpoint()
+	if over := modelFromCtx(ctx); over != "" {
+		model = over
+	}
+	return context.WithValue(ctx, endpointKey{}, requestEndpoint{base, key, model, proxy, window})
+}
+
 // WithModelOverride 在 context 中指定本次请求使用的模型(按用户组)
 func WithModelOverride(ctx context.Context, model string) context.Context {
 	return context.WithValue(ctx, ctxModelKey{}, model)
@@ -177,6 +213,9 @@ func modelFromCtx(ctx context.Context) string {
 // Complete 返回模型完整回复消息(可能含 ToolCalls)
 func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
 	baseURL, apiKey, model, proxy := c.endpoint()
+	if endpoint, ok := ctx.Value(endpointKey{}).(requestEndpoint); ok {
+		baseURL, apiKey, model, proxy = endpoint.BaseURL, endpoint.APIKey, endpoint.Model, endpoint.Proxy
+	}
 	if m := modelFromCtx(ctx); m != "" {
 		model = m
 	}
@@ -235,5 +274,12 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool)
 		return nil, fmt.Errorf("LLM 无响应")
 	}
 	msg := result.Choices[0].Message
+	// Normalize final text at the model boundary so replies, history, and proactive
+	// messages share the same behavior. Tool names and arguments remain untouched.
+	text := cleanAssistantOutput(msg.TextContent())
+	msg.Content = text
+	if len(msg.ToolCalls) == 0 && text == "" {
+		return nil, fmt.Errorf("模型未返回可显示的正文")
+	}
 	return &msg, nil
 }

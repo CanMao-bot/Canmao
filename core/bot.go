@@ -2,18 +2,24 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 type Sender interface {
 	SendGroupMsg(groupID, userID int64, msg []Segment) error
 	SendPrivateMsg(userID int64, msg []Segment) error
+}
+
+// QQAPIClient exposes native OneBot actions. Stream callbacks receive intermediate
+// data frames; the returned data is always the final API response.
+type QQAPIClient interface {
+	CallQQAPI(ctx context.Context, action string, params map[string]interface{}, onStream func(json.RawMessage) error) (json.RawMessage, error)
 }
 
 // FileClient 文件/图片交互能力(由 adapter 实现)
@@ -35,6 +41,7 @@ type ForwardSender interface {
 // MessageInfo 消息详情(get_msg)
 type MessageInfo struct {
 	MessageID  int64
+	GroupID    int64
 	UserID     int64
 	Nickname   string
 	Time       int64
@@ -100,6 +107,15 @@ type Service interface {
 	Handle(ctx context.Context, bot *Bot, ev *Event) bool
 }
 
+// ControlService 只处理唤醒运行中任务的短消息，不占普通任务的执行名额。
+type ControlService interface {
+	HandleControl(ctx context.Context, bot *Bot, ev *Event) bool
+}
+
+// EventPolicy applies to all services, including the fast approval/ask control path.
+// Implementations must not perform network requests on this ingress path.
+type EventPolicy interface{ AllowEvent(ev *Event) bool }
+
 type Bot struct {
 	Cfg      *Config
 	Sender   Sender
@@ -109,19 +125,21 @@ type Bot struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	// dispatch 背压: 限制并发处理的事件数, 防止消息洪峰(刷屏/被拉群)无限起 goroutine 打爆 LLM API
-	dispatchSem chan struct{}
+	dispatchSem  chan struct{}
+	ingress      chan *Event
+	dispatchOnce sync.Once
+	stopped      bool
+	routers      sync.WaitGroup
+	workers      sync.WaitGroup
 }
 
 // maxDispatchConcurrency 全局并发事件处理上限。
 // 审批等待等长阻塞也会占用名额, 容量需留足余量(正常聊天很难同时有几十个在途事件)。
 const maxDispatchConcurrency = 64
 
-// dispatchDropWait 事件满载时的最长等待; 超时丢弃防止无界堆积
-const dispatchDropWait = 5 * time.Second
-
 func NewBot(cfg *Config) *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Bot{Cfg: cfg, ctx: ctx, cancel: cancel, dispatchSem: make(chan struct{}, maxDispatchConcurrency)}
+	return &Bot{Cfg: cfg, ctx: ctx, cancel: cancel, dispatchSem: make(chan struct{}, maxDispatchConcurrency), ingress: make(chan *Event, 1024)}
 }
 
 func (b *Bot) SetSender(s Sender) {
@@ -140,21 +158,94 @@ func (b *Bot) RegisterService(s Service) {
 
 func (b *Bot) Run() {}
 
-func (b *Bot) Shutdown() { b.cancel() }
+func (b *Bot) Shutdown() { b.mu.Lock(); b.stopped = true; b.cancel(); b.mu.Unlock() }
+
+func (b *Bot) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { b.routers.Wait(); b.workers.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (b *Bot) Dispatch(ev *Event) {
-	// 异步分发: Agent 等待用户审批时不能阻塞 WS 读取循环
-	// 背压: 先占全局并发名额, 满载短暂等待后丢弃(带日志), 避免 goroutine/API 无限膨胀
-	select {
-	case b.dispatchSem <- struct{}{}:
-	case <-time.After(dispatchDropWait):
-		log.Printf("[core] 事件处理满载(>=%d 并发), 丢弃消息 (id=%d, user=%d)", maxDispatchConcurrency, ev.MessageID, ev.UserID)
+	if ev == nil {
 		return
 	}
-	go func() {
-		defer func() { <-b.dispatchSem }()
-		b.dispatch(ev)
-	}()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.stopped {
+		return
+	}
+	b.dispatchOnce.Do(func() {
+		for i := 0; i < 4; i++ {
+			b.routers.Add(1)
+			go func() { defer b.routers.Done(); b.routeEvents() }()
+		}
+	})
+	// 接收路径绝不等待执行名额，也不做网络请求。
+	select {
+	case <-b.ctx.Done():
+	case b.ingress <- ev:
+	default:
+		log.Printf("[core] 接收队列已满，丢弃事件 id=%d", ev.MessageID)
+	}
+}
+
+func (b *Bot) serviceSnapshot() []Service {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return append([]Service(nil), b.services...)
+}
+
+func (b *Bot) routeEvents() {
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case ev := <-b.ingress:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[core] 控制消息处理异常: %v", r)
+					}
+				}()
+				ctx := WithEvent(b.ctx, ev)
+				if ctx.Err() != nil {
+					return
+				}
+				for _, svc := range b.serviceSnapshot() {
+					if policy, ok := svc.(EventPolicy); ok && !policy.AllowEvent(ev) {
+						return
+					}
+				}
+				for _, svc := range b.serviceSnapshot() {
+					if control, ok := svc.(ControlService); ok && control.HandleControl(ctx, b, ev) {
+						return
+					}
+				}
+				select {
+				case b.dispatchSem <- struct{}{}:
+					b.workers.Add(1)
+					go func() {
+						defer b.workers.Done()
+						defer func() {
+							<-b.dispatchSem
+							if r := recover(); r != nil {
+								log.Printf("[core] 事件处理异常: %v", r)
+							}
+						}()
+						b.dispatch(ev)
+					}()
+				default:
+					log.Printf("[core] 执行任务已满，丢弃普通事件 id=%d", ev.MessageID)
+				}
+			}()
+		}
+	}
 }
 
 func (b *Bot) dispatch(ev *Event) {

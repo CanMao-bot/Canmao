@@ -9,22 +9,30 @@ import (
 )
 
 type Config struct {
-	Bot    BotConfig    `yaml:"bot"`
-	OneBot OneBotConfig `yaml:"onebot"`
-	Data   DataConfig   `yaml:"data"`
-	AI     AIConfig     `yaml:"ai"`
-	Memory MemoryConfig `yaml:"memory"`
-	Mood   MoodConfig   `yaml:"mood"`
-	Persona PersonaConfig `yaml:"persona"`
-	Web    WebConfig    `yaml:"web"`
-	Sched  SchedConfig  `yaml:"sched"`
-	Media  MediaConfig  `yaml:"media"`
-	ACP    ACPConfig    `yaml:"acp"`
-	MCP    MCPConfig    `yaml:"mcp"`
-	Skills SkillsConfig `yaml:"skills"`
-	Plugin PluginConfig `yaml:"plugin"`
-	GroupReq GroupReqConfig `yaml:"group_request"`
-	Features FeaturesConfig `yaml:"features"`
+	Bot       BotConfig       `yaml:"bot"`
+	OneBot    OneBotConfig    `yaml:"onebot"`
+	Data      DataConfig      `yaml:"data"`
+	AI        AIConfig        `yaml:"ai"`
+	Memory    MemoryConfig    `yaml:"memory"`
+	Mood      MoodConfig      `yaml:"mood"`
+	Persona   PersonaConfig   `yaml:"persona"`
+	Web       WebConfig       `yaml:"web"`
+	Sched     SchedConfig     `yaml:"sched"`
+	Media     MediaConfig     `yaml:"media"`
+	ACP       ACPConfig       `yaml:"acp"`
+	MCP       MCPConfig       `yaml:"mcp"`
+	Skills    SkillsConfig    `yaml:"skills"`
+	Plugin    PluginConfig    `yaml:"plugin"`
+	GroupReq  GroupReqConfig  `yaml:"group_request"`
+	Features  FeaturesConfig  `yaml:"features"`
+	Community CommunityConfig `yaml:"community"`
+}
+
+type CommunityConfig struct {
+	Enabled        *bool  `yaml:"enabled"` // nil enables deterministic community features
+	Timezone       string `yaml:"timezone"`
+	DefaultMode    string `yaml:"default_mode"`     // separate/global; private accounts remain isolated
+	TransferFeeBPS int    `yaml:"transfer_fee_bps"` // 100 basis points = 1%
 }
 
 // FeaturesConfig 细粒度功能开关(*bool, nil=默认开启)
@@ -38,7 +46,7 @@ type FeaturesConfig struct {
 	SilentDeny    *bool `yaml:"silent_deny"`     // 群内无权限命令静默(关闭则回复"无权限")
 	EnvInject     *bool `yaml:"env_inject"`      // 群上下文注入 [当前环境](群名/群号/时间)
 	GroupMeta     *bool `yaml:"group_meta"`      // 群 meta(自己身份/头衔/管理名单) + get_member_info 工具
-	MsgTimestamp  *bool `yaml:"msg_timestamp"`   // 历史消息时间戳前缀
+	MsgTimestamp  *bool `yaml:"msg_timestamp"`   // 独立的历史消息时间索引
 }
 
 // FeatureOn 功能开关取值: nil 视为开启
@@ -51,17 +59,17 @@ type GroupReqConfig struct {
 
 // ACPConfig 调用 opencode 等 ACP agent 干活
 type ACPConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Binary   string `yaml:"binary"`   // opencode 二进制路径
-	Cwd      string `yaml:"cwd"`      // 默认工作目录
-	Tool     bool   `yaml:"tool"`     // 给 AI 提供 opencode_task 工具
-	Timeout  int    `yaml:"timeout"`  // 单任务超时秒
+	Enabled bool   `yaml:"enabled"`
+	Binary  string `yaml:"binary"`  // opencode 二进制路径
+	Cwd     string `yaml:"cwd"`     // 默认工作目录
+	Tool    bool   `yaml:"tool"`    // 给 AI 提供 opencode_task 工具
+	Timeout int    `yaml:"timeout"` // 单任务超时秒
 }
 
 // MediaConfig 图像生成/TTS 配置
 type MediaConfig struct {
 	Enabled     bool   `yaml:"enabled"`
-	BaseURL     string `yaml:"base_url"`     // DashScope API, 默认 https://dashscope.aliyuncs.com
+	BaseURL     string `yaml:"base_url"` // DashScope API, 默认 https://dashscope.aliyuncs.com
 	APIKey      string `yaml:"api_key"`
 	ImageModel  string `yaml:"image_model"`  // 图像生成模型, 默认 wanx-v1
 	TTSEndpoint string `yaml:"tts_endpoint"` // TTS 模型, 默认 qwen3-tts-flash
@@ -70,7 +78,7 @@ type MediaConfig struct {
 
 // SchedConfig 定时任务配置
 type SchedConfig struct {
-	Enabled     bool `yaml:"enabled"`
+	Enabled      bool `yaml:"enabled"`
 	ScheduleTool bool `yaml:"schedule_tool"` // 给 AI 定时任务工具
 }
 
@@ -83,43 +91,43 @@ type WebConfig struct {
 
 // PersonaConfig 人设系统配置
 type PersonaConfig struct {
-	Enabled     bool   `yaml:"enabled"`      // 人设系统开关
-	Base        string `yaml:"base"`         // 基础人设描述
-	SelfImprove bool   `yaml:"self_improve"` // 自我优化开关
-	ImproveEvery int   `yaml:"improve_every"`// 每N条消息反思一次
+	Enabled      bool   `yaml:"enabled"`       // 人设系统开关
+	Base         string `yaml:"base"`          // 基础人设描述
+	SelfImprove  bool   `yaml:"self_improve"`  // 自我优化开关
+	ImproveEvery int    `yaml:"improve_every"` // 每N条消息反思一次
 }
 
 // MoodConfig 心情/主动回复配置
 type MoodConfig struct {
-	Enabled      bool `yaml:"enabled"`        // 心情系统开关
-	Proactive    bool `yaml:"proactive"`      // 主动回复开关
-	EveryN       int  `yaml:"every_n"`        // 每N条群消息到达一次插话检查点(默认15)
-	RememberTool bool `yaml:"remember_tool"`  // 是否给 AI 主动记忆工具
-	CooldownMin  int  `yaml:"cooldown_min_minutes"`  // 插话冷却最小分钟(默认5)
-	CooldownMax  int  `yaml:"cooldown_max_minutes"`  // 插话冷却最大分钟(默认15, 实际取随机区间)
-	CareCooldown int  `yaml:"care_cooldown_minutes"` // 情感关怀冷却分钟(默认2, 低落时更快再次安慰)
-	PunishEnabled      bool `yaml:"punish_enabled"`       // 心情驱动自主管理操作开关(心情极差时禁言/改昵称惹怒者, 免审批)
-	PunishMoodThreshold int `yaml:"punish_mood_threshold"` // 自主惩罚心情阈值(默认30, 值低于此或 angry 时触发)
-	PunishCooldownMin   int `yaml:"punish_cooldown_minutes"` // 自主惩罚间隔分钟(默认30, 防反复惩罚)
+	Enabled             bool `yaml:"enabled"`                 // 心情系统开关
+	Proactive           bool `yaml:"proactive"`               // 主动回复开关
+	EveryN              int  `yaml:"every_n"`                 // 每N条群消息到达一次插话检查点(默认15)
+	RememberTool        bool `yaml:"remember_tool"`           // 是否给 AI 主动记忆工具
+	CooldownMin         int  `yaml:"cooldown_min_minutes"`    // 插话冷却最小分钟(默认5)
+	CooldownMax         int  `yaml:"cooldown_max_minutes"`    // 插话冷却最大分钟(默认15, 实际取随机区间)
+	CareCooldown        int  `yaml:"care_cooldown_minutes"`   // 情感关怀冷却分钟(默认2, 低落时更快再次安慰)
+	PunishEnabled       bool `yaml:"punish_enabled"`          // 心情驱动自主管理操作开关(心情极差时禁言/改昵称惹怒者, 免审批)
+	PunishMoodThreshold int  `yaml:"punish_mood_threshold"`   // 自主惩罚心情阈值(默认30, 值低于此或 angry 时触发)
+	PunishCooldownMin   int  `yaml:"punish_cooldown_minutes"` // 自主惩罚间隔分钟(默认30, 防反复惩罚)
 }
 
 // MemoryConfig 记忆机制配置
 type MemoryConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	EmbedBaseURL  string `yaml:"embed_base_url"`
-	EmbedAPIKey   string `yaml:"embed_api_key"`
-	EmbedModel    string `yaml:"embed_model"`
-	RecallLimit   int    `yaml:"recall_limit"`
-	VisionModel   string `yaml:"vision_model"` // 识图转述模型(如 qwen3.6-flash)
+	Enabled      bool   `yaml:"enabled"`
+	EmbedBaseURL string `yaml:"embed_base_url"`
+	EmbedAPIKey  string `yaml:"embed_api_key"`
+	EmbedModel   string `yaml:"embed_model"`
+	RecallLimit  int    `yaml:"recall_limit"`
+	VisionModel  string `yaml:"vision_model"` // ai.image_mode=caption 时使用的图片转述模型
 }
 
 type BotConfig struct {
-	Name                string   `yaml:"name"`
-	MasterID            string   `yaml:"master_id"`
-	Prefix              string   `yaml:"prefix"`
-	AdminIDs            []string `yaml:"admin_ids"`
-	LongMessageForward  bool     `yaml:"long_message_forward"`  // 长消息用合并转发发送
-	LongMessageThreshold int    `yaml:"long_message_threshold"` // 长消息阈值(字符数)
+	Name                 string   `yaml:"name"`
+	MasterID             string   `yaml:"master_id"`
+	Prefix               string   `yaml:"prefix"`
+	AdminIDs             []string `yaml:"admin_ids"`
+	LongMessageForward   bool     `yaml:"long_message_forward"`   // 长消息用合并转发发送
+	LongMessageThreshold int      `yaml:"long_message_threshold"` // 长消息阈值(字符数)
 }
 
 type OneBotConfig struct {
@@ -134,22 +142,23 @@ type DataConfig struct {
 }
 
 type AIConfig struct {
-	BaseURL      string  `yaml:"base_url"`
-	APIKey       string  `yaml:"api_key"`
-	Model        string  `yaml:"model"`
-	SystemPrompt string  `yaml:"system_prompt"`
-	MaxTokens    int     `yaml:"max_tokens"`
-	Temperature  float64 `yaml:"temperature"`
-	Timeout      int     `yaml:"timeout"`
-	DefaultOn    bool    `yaml:"default_on"`
-	MaxHistory   int     `yaml:"max_history"`
-	CompactToken int     `yaml:"compact_token"`
-	SessionMode  string  `yaml:"session_mode"`  // group: merged=全群合并 / separate=按用户独立
-	MentionOnly  bool    `yaml:"mention_only"`  // 群内仅 @bot 时响应
+	BaseURL          string   `yaml:"base_url"`
+	APIKey           string   `yaml:"api_key"`
+	Model            string   `yaml:"model"`
+	ImageMode        string   `yaml:"image_mode"` // native=原图交给当前模型 / caption=独立模型转述
+	SystemPrompt     string   `yaml:"system_prompt"`
+	MaxTokens        int      `yaml:"max_tokens"`
+	Temperature      float64  `yaml:"temperature"`
+	Timeout          int      `yaml:"timeout"`
+	DefaultOn        bool     `yaml:"default_on"`
+	MaxHistory       int      `yaml:"max_history"`
+	CompactToken     int      `yaml:"compact_token"`
+	SessionMode      string   `yaml:"session_mode"`      // group: merged=全群合并 / separate=按用户独立
+	MentionOnly      bool     `yaml:"mention_only"`      // 群内仅 @bot 时响应
 	ReplyProbability *float64 `yaml:"reply_probability"` // 群消息概率触发 AI(0~1, 0=禁用), nil=默认全触发
-	ContextWindow int    `yaml:"context_window"` // 模型上下文窗口 token 数
-	MaxIterations int    `yaml:"max_iterations"` // Agent 工具调用最大轮数
-	ToolResultMax int    `yaml:"tool_result_max"` // 工具结果最大字符数(超出截断)
+	ContextWindow    int      `yaml:"context_window"`    // 模型上下文窗口 token 数
+	MaxIterations    int      `yaml:"max_iterations"`    // Agent 工具调用最大轮数
+	ToolResultMax    int      `yaml:"tool_result_max"`   // 工具结果最大字符数(超出截断)
 }
 
 type MCPConfig struct {
@@ -183,6 +192,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件 %s: %w", path, err)
 	}
 	cfg.applyDefaults()
+	if cfg.AI.ImageMode != "native" && cfg.AI.ImageMode != "caption" {
+		return nil, fmt.Errorf("ai.image_mode 须为 native 或 caption")
+	}
 	abs, err := filepath.Abs(path)
 	if err == nil {
 		cfg.Data.Dir = absDir(filepath.Dir(abs), cfg.Data.Dir)
@@ -193,6 +205,21 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.AI.ImageMode == "" {
+		c.AI.ImageMode = "native"
+	}
+	if c.Community.Timezone == "" {
+		c.Community.Timezone = "Asia/Shanghai"
+	}
+	if c.Community.DefaultMode != "global" {
+		c.Community.DefaultMode = "separate"
+	}
+	if c.Community.TransferFeeBPS < 0 {
+		c.Community.TransferFeeBPS = 0
+	}
+	if c.Community.TransferFeeBPS > 1000 {
+		c.Community.TransferFeeBPS = 1000
+	}
 	if c.Bot.Name == "" {
 		c.Bot.Name = "罐头喵"
 	}

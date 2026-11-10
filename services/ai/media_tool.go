@@ -6,7 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -89,27 +89,37 @@ func (s *Service) generateImageCallback(ctx context.Context, args map[string]int
 
 // saveMediaImage 下载图片保存, 返回(文件路径, 文件名)
 func (s *Service) saveMediaImage(ctx context.Context, url string) (string, string, error) {
-	if s.fileDir == "" {
+	if s.fileSaver == nil {
 		return "", "", fmt.Errorf("文件目录未配置")
 	}
 	// 用通用 http 客户端下载
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
 	if err != nil {
 		return "", "", err
 	}
+	if len(data) > maxImageBytes {
+		return "", "", fmt.Errorf("生成图片超过大小上限")
+	}
 	// 生成文件名
-	name := fmt.Sprintf("img_%d.png", time.Now().Unix())
-	path := s.fileDir + "/" + name
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	name := fmt.Sprintf("img_%d.png", time.Now().UnixNano())
+	path, err := s.fileSaver(ctx, name, data)
+	if err != nil {
 		return "", "", err
 	}
-	return path, name, nil
+	return path, filepath.Base(path), nil
 }
 
 // ttsTool TTS 语音合成工具
@@ -163,18 +173,29 @@ func (s *Service) ttsTool(voice string) Tool {
 
 // saveMediaAudio 下载音频保存到文件目录, 返回文件路径
 func (s *Service) saveMediaAudio(ctx context.Context, url string) (string, error) {
-	if s.fileDir == "" {
+	if s.fileSaver == nil {
 		return "", fmt.Errorf("文件目录未配置")
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
+	}
+	const maxAudioBytes = 100 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAudioBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(data) > maxAudioBytes {
+		return "", fmt.Errorf("生成音频超过大小上限")
 	}
 	// 推断格式: URL 通常带 .mp3/.wav 后缀, 否则用 mp3
 	ext := "mp3"
@@ -186,12 +207,8 @@ func (s *Service) saveMediaAudio(ctx context.Context, url string) (string, error
 	} else if strings.Contains(u, ".amr") {
 		ext = "amr"
 	}
-	name := fmt.Sprintf("tts_%d.%s", time.Now().Unix(), ext)
-	path := s.fileDir + "/" + name
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", err
-	}
-	return path, nil
+	name := fmt.Sprintf("tts_%d.%s", time.Now().UnixNano(), ext)
+	return s.fileSaver(ctx, name, data)
 }
 
 func (s *Service) registerMediaTools(voice string) {

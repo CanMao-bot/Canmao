@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
@@ -12,24 +11,26 @@ import (
 
 	"gobot/adapter"
 	"gobot/core"
-	"gobot/services/ai"
 	"gobot/services/acp"
+	"gobot/services/ai"
+	"gobot/services/community"
 	"gobot/services/dashscope"
 	"gobot/services/file"
 	"gobot/services/groupreq"
 	"gobot/services/mcp"
 	"gobot/services/memory"
 	"gobot/services/plugin"
+	"gobot/services/sched"
 	"gobot/services/shell"
 	"gobot/services/skill"
-	"gobot/services/sched"
 	"gobot/services/web"
 	"gobot/store/allow"
+	communitystore "gobot/store/community"
 	"gobot/store/group"
 	memstore "gobot/store/memory"
 	moodstore "gobot/store/mood"
-	personastore "gobot/store/persona"
 	"gobot/store/perm"
+	personastore "gobot/store/persona"
 	"gobot/store/provider"
 	schedstore "gobot/store/sched"
 	"gobot/store/session"
@@ -74,9 +75,8 @@ func main() {
 			log.Println("[adapter] WS 断开")
 			return
 		}
-		if data, _ := json.Marshal(ev); len(data) > 0 {
-			log.Printf("[event] %s", data)
-		}
+		// Private commands may contain provider credentials; never log message bodies.
+		log.Printf("[event] type=%s detail=%s notice=%s user=%d group=%d message=%d", ev.Type, ev.DetailType, ev.NoticeType, ev.UserID, ev.GroupID, ev.MessageID)
 		bot.Dispatch(ev)
 	})
 
@@ -181,6 +181,20 @@ func main() {
 		log.Printf("[web] Web 能力已启用 (search/fetch/browser)")
 	}
 
+	// Community policy precedes file/plugin/AI services and their control paths.
+	if core.FeatureOn(cfg.Community.Enabled) {
+		communityStore, err := communitystore.New(cfg.Data.Dir)
+		if err != nil {
+			log.Fatalf("初始化群娱存储失败: %v", err)
+		}
+		defer communityStore.Close()
+		communitySvc, err := community.New(bot, communityStore, permStore)
+		if err != nil {
+			log.Fatalf("初始化群娱服务失败: %v", err)
+		}
+		bot.RegisterService(communitySvc)
+	}
+
 	// 定时任务服务
 	var schedSvc *sched.Scheduler
 	if cfg.Sched.Enabled {
@@ -208,7 +222,6 @@ func main() {
 			TTSEndpoint: cfg.Media.TTSEndpoint,
 		})
 		aiSvc.SetMediaClient(mediaClient, cfg.Media.Voice)
-		aiSvc.SetFileDir(cfg.Data.Dir + "/files")
 		log.Printf("[media] 图像生成(%s) + TTS(%s) 已启用", cfg.Media.ImageModel, cfg.Media.TTSEndpoint)
 	}
 
@@ -242,6 +255,7 @@ func main() {
 
 	// 文件管理服务 (自动保存收到的图片/文件, 提供上传能力)
 	fileMgr := file.New(cfg.Data.Dir, bot, ws, permStore, cfg.Data.FileRetentionDays)
+	aiSvc.SetFileSaver(fileMgr.SaveMedia)
 	bot.RegisterService(fileMgr)
 
 	// 入群申请管理 (bot 是群管理时把申请发卡到群里, 群内命令审批)
@@ -294,6 +308,12 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Println("收到退出信号, 正在关闭...")
+	bot.Shutdown()
+	waitCtx, stopWaiting := context.WithTimeout(context.Background(), 35*time.Second)
+	if err := bot.Wait(waitCtx); err != nil {
+		log.Printf("等待进行中的任务退出: %v", err)
+	}
+	stopWaiting()
 	mcpMgr.Close()
 	pluginMgr.Close()
 	fileMgr.Close()

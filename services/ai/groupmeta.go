@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,6 +53,9 @@ func roleText(role string) string {
 
 func int64From(v interface{}) int64 {
 	switch n := v.(type) {
+	case json.Number:
+		id, _ := n.Int64()
+		return id
 	case float64:
 		return int64(n)
 	case int64:

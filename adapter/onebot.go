@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,7 +130,7 @@ func (o *OneBot) readLoop() {
 			continue
 		}
 		var probe struct {
-			Echo   string `json:"echo"`
+			Echo     string `json:"echo"`
 			PostType string `json:"post_type"`
 		}
 		if err := json.Unmarshal(data, &probe); err != nil {
@@ -138,7 +139,13 @@ func (o *OneBot) readLoop() {
 		if probe.Echo != "" {
 			o.mu.Lock()
 			if ch, ok := o.echoChans[probe.Echo]; ok {
-				ch <- json.RawMessage(data)
+				// A slow stream consumer must not block events or other API calls.
+				select {
+				case ch <- json.RawMessage(data):
+				default:
+					close(ch)
+					delete(o.echoChans, probe.Echo)
+				}
 			}
 			o.mu.Unlock()
 		} else if probe.PostType != "" && o.onEvent != nil {
@@ -154,6 +161,10 @@ func (o *OneBot) Close() error {
 	o.mu.Lock()
 	o.closed = true
 	conn := o.conn
+	for echo, ch := range o.echoChans {
+		close(ch)
+		delete(o.echoChans, echo)
+	}
 	o.mu.Unlock()
 	if conn != nil {
 		return conn.Close()
@@ -165,17 +176,42 @@ type CallResult struct {
 	Status  string          `json:"status"`
 	Retcode int             `json:"retcode"`
 	Data    json.RawMessage `json:"data"`
+	Message string          `json:"message"`
+	Wording string          `json:"wording"`
 }
 
 func (o *OneBot) Call(action string, params map[string]interface{}) (*CallResult, error) {
+	return o.CallContext(context.Background(), action, params)
+}
+
+func (o *OneBot) CallContext(ctx context.Context, action string, params map[string]interface{}) (*CallResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return o.callContext(ctx, action, params, nil)
+}
+
+func (o *OneBot) CallQQAPI(ctx context.Context, action string, params map[string]interface{}, onStream func(json.RawMessage) error) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cr, err := o.callContext(ctx, action, params, onStream)
+	if err != nil {
+		return nil, err
+	}
+	return cr.Data, nil
+}
+
+func (o *OneBot) callContext(ctx context.Context, action string, params map[string]interface{}, onStream func(json.RawMessage) error) (*CallResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	o.mu.Lock()
 	conn := o.conn
-	if conn == nil {
+	if conn == nil || o.closed {
 		o.mu.Unlock()
 		return nil, errors.New("连接未建立")
 	}
 	echo := fmt.Sprintf("echo_%d", time.Now().UnixNano())
-	ch := make(chan json.RawMessage, 1)
+	ch := make(chan json.RawMessage, 64)
 	o.echoChans[echo] = ch
 	o.mu.Unlock()
 
@@ -191,24 +227,57 @@ func (o *OneBot) Call(action string, params map[string]interface{}) (*CallResult
 		"echo":   echo,
 	}
 	o.mu.Lock()
-	err := conn.WriteJSON(msg)
+	if ctx.Err() != nil || conn != o.conn || o.closed {
+		o.mu.Unlock()
+		return nil, errors.New("调用已取消或连接已更换，未发送请求")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	err := conn.SetWriteDeadline(deadline)
+	if err == nil {
+		err = conn.WriteJSON(msg)
+	}
 	o.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 
-	select {
-	case resp := <-ch:
-		var cr CallResult
-		if err := json.Unmarshal(resp, &cr); err != nil {
-			return nil, err
+	for {
+		select {
+		case resp, ok := <-ch:
+			if !ok {
+				return nil, errors.New("API 连接中断或接收队列溢出，执行结果不确定，请勿自动重试")
+			}
+			var cr CallResult
+			if err := json.Unmarshal(resp, &cr); err != nil {
+				return nil, err
+			}
+			if cr.Retcode != 0 || cr.Status != "ok" {
+				message := cr.Message
+				if message == "" {
+					message = cr.Wording
+				}
+				return &cr, fmt.Errorf("API %s 返回错误 status=%s retcode=%d: %s", action, cr.Status, cr.Retcode, message)
+			}
+			var frame struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(cr.Data, &frame)
+			if frame.Type == "stream" {
+				if onStream == nil {
+					return nil, errors.New("此接口返回数据流，需要流式调用")
+				}
+				if err := onStream(cr.Data); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return &cr, nil
+		case <-ctx.Done():
+			return nil, fmt.Errorf("API 等待中断，执行结果不确定，请勿自动重试: %w", ctx.Err())
 		}
-		if cr.Retcode != 0 {
-			return &cr, fmt.Errorf("API 返回错误 retcode=%d", cr.Retcode)
-		}
-		return &cr, nil
-	case <-time.After(30 * time.Second):
-		return nil, errors.New("API 调用超时")
 	}
 }
 
@@ -278,9 +347,10 @@ func (o *OneBot) GetMsg(messageID int64) (*core.MessageInfo, error) {
 		return nil, err
 	}
 	var data struct {
-		MessageID  int64 `json:"message_id"`
-		Time       int64 `json:"time"`
-		RawMessage string `json:"raw_message"`
+		MessageID  int64           `json:"message_id"`
+		GroupID    int64           `json:"group_id"`
+		Time       int64           `json:"time"`
+		RawMessage string          `json:"raw_message"`
 		Message    json.RawMessage `json:"message"`
 		Sender     struct {
 			UserID   int64  `json:"user_id"`
@@ -292,6 +362,7 @@ func (o *OneBot) GetMsg(messageID int64) (*core.MessageInfo, error) {
 	}
 	info := &core.MessageInfo{
 		MessageID:  data.MessageID,
+		GroupID:    data.GroupID,
 		UserID:     data.Sender.UserID,
 		Nickname:   data.Sender.Nickname,
 		Time:       data.Time,
@@ -494,10 +565,32 @@ func (o *OneBot) GetGroupInfo(groupID int64) (map[string]interface{}, error) {
 	return m, nil
 }
 
+func (o *OneBot) GetGroupList() ([]map[string]interface{}, error) {
+	cr, err := o.Call("get_group_list", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var groups []map[string]interface{}
+	if err := json.Unmarshal(cr.Data, &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func (o *OneBot) DeleteMsg(messageID int64) error {
+	_, err := o.Call("delete_msg", map[string]interface{}{"message_id": messageID})
+	return err
+}
+
+func (o *OneBot) SetFriendAddRequest(flag string, approve bool, remark string) error {
+	_, err := o.Call("set_friend_add_request", map[string]interface{}{"flag": flag, "approve": approve, "remark": remark})
+	return err
+}
+
 // GetGroupMemberInfo 获取群成员信息
 func (o *OneBot) GetGroupMemberInfo(groupID, userID int64) (map[string]interface{}, error) {
 	cr, err := o.Call("get_group_member_info", map[string]interface{}{
-		"group_id": groupID, "user_id": userID,
+		"group_id": groupID, "user_id": userID, "no_cache": true,
 	})
 	if err != nil {
 		return nil, err

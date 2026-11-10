@@ -53,6 +53,7 @@ func newTestManager(t *testing.T) (*Manager, *core.Bot, *perm.Store, *fakeFC) {
 	}
 	fc := &fakeFC{}
 	m := New(dir, bot, fc, pst, 0)
+	t.Cleanup(func() { m.Close(); pst.Close(); bot.Shutdown() })
 	return m, bot, pst, fc
 }
 
@@ -70,7 +71,7 @@ func TestSaveFromURL(t *testing.T) {
 	if name != "test.txt" {
 		t.Fatalf("name = %q, want test.txt", name)
 	}
-	if !fileExists(filepath.Join(m.dir, name)) {
+	if !fileExists(filepath.Join(m.dir, "private_100", name)) {
 		t.Fatal("文件未保存")
 	}
 	list := m.List()
@@ -236,7 +237,9 @@ func TestGroupUploadNotice(t *testing.T) {
 // send_file 工具私聊分支: 应调用 UploadPrivateFile
 func TestSendFileToolPrivate(t *testing.T) {
 	m, _, _, fc := newTestManager(t)
-	p := filepath.Join(m.dir, "x.txt")
+	dir := filepath.Join(m.dir, "private_100")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "x.txt")
 	os.WriteFile(p, []byte("x"), 0o644)
 	m.loadIndex()
 

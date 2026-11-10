@@ -51,18 +51,18 @@ func NewMoodManager(st *mood.Store, bot *core.Bot, interval int) *MoodManager {
 		interval = 10
 	}
 	return &MoodManager{
-		store:          st,
-		bot:            bot,
-		msgCount:       map[int64]int{},
-		interval:       interval,
-		nextInterject:  map[int64]time.Time{},
-		cooldownMin:    5 * time.Minute,
-		cooldownMax:    15 * time.Minute,
-		careCooldown:   2 * time.Minute,
-		aggressors:     map[int64]int64{},
-		punishCooldown: map[int64]time.Time{},
-		punishInterval: 30 * time.Minute,
-		punishEnabled:  true,
+		store:               st,
+		bot:                 bot,
+		msgCount:            map[int64]int{},
+		interval:            interval,
+		nextInterject:       map[int64]time.Time{},
+		cooldownMin:         5 * time.Minute,
+		cooldownMax:         15 * time.Minute,
+		careCooldown:        2 * time.Minute,
+		aggressors:          map[int64]int64{},
+		punishCooldown:      map[int64]time.Time{},
+		punishInterval:      30 * time.Minute,
+		punishEnabled:       true,
 		punishMoodThreshold: 30,
 	}
 }
@@ -236,16 +236,16 @@ func (m *MoodManager) JudgeInterject(ctx context.Context, text, moodTxt string, 
 
 // EmotionResult AI 情感分析结果
 type EmotionResult struct {
-	Delta  int    `json:"delta"`  // 心情变化 -30 ~ +30
+	Delta   int    `json:"delta"`   // 心情变化 -30 ~ +30
 	Emotion string `json:"emotion"` // happy / neutral / sad / angry
-	Reason string `json:"reason"`  // 变化原因(中文)
+	Reason  string `json:"reason"`  // 变化原因(中文)
 }
 
 // InterjectResult 插话判断结果
 type InterjectResult struct {
-	Should bool   `json:"should"`  // 是否值得主动插话
-	Mode   string `json:"mode"`    // chat=正常搭话 / care=情感关怀 / silent=静默
-	Reason string `json:"reason"`  // 简短中文原因
+	Should bool   `json:"should"` // 是否值得主动插话
+	Mode   string `json:"mode"`   // chat=正常搭话 / care=情感关怀 / silent=静默
+	Reason string `json:"reason"` // 简短中文原因
 }
 
 // SetLLM 注入 AI 情感判断函数
@@ -292,6 +292,10 @@ func (m *MoodManager) Apply(delta int, emotion, reason string) (*mood.State, err
 // DetectAndApply 从消息中检测情绪并应用
 // 优先用 AI 判断(理解讽刺/语气), AI 不可用时回退关键词规则
 func (m *MoodManager) DetectAndApply(text string) *mood.State {
+	return m.DetectAndApplyContext(context.Background(), text)
+}
+
+func (m *MoodManager) DetectAndApplyContext(ctx context.Context, text string) *mood.State {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return nil
@@ -303,7 +307,7 @@ func (m *MoodManager) DetectAndApply(text string) *mood.State {
 
 	// AI 情感判断
 	if m.llm != nil {
-		res, err := m.llm(context.Background(), trimmed)
+		res, err := m.llm(ctx, trimmed)
 		if err == nil && (res.Delta != 0 || res.Emotion != "") {
 			emotion := res.Emotion
 			if emotion == "" {
@@ -414,7 +418,7 @@ func (m *MoodManager) CarePrompt() (string, error) {
 		"要求: 语气自然、像朋友聊天, 不要说教、不喊口号、不复制鸡汤; 一两句话即可; 不要@别人; 不要加任何前缀。", reason), nil
 }
 
-	var _ = context.Background
+var _ = context.Background
 
 // recordGroupMsg 记录最近群消息到环形缓冲
 func (s *Service) recordGroupMsg(groupID int64, role string, sender int64, content string) {
@@ -471,7 +475,7 @@ func (s *Service) recentGroupContext(groupID int64, max int) []Message {
 
 // maybeProactiveInterject 对单条群消息做 LLM 插话判断, 命中则搭话(情感关怀优先)
 func (s *Service) maybeProactiveInterject(ctx context.Context, groupID int64, text string) {
-	if s.moodMgr == nil {
+	if s.moodMgr == nil || !s.groupAIEnabled(groupID) {
 		return
 	}
 	moodTxt, err := s.moodMgr.ProactivePrompt()
@@ -500,7 +504,7 @@ func (s *Service) maybeProactiveInterject(ctx context.Context, groupID int64, te
 
 // proactiveReply 主动回复: 带最近群聊上下文(环形缓冲), 用主模型生成一句搭话发给群
 func (s *Service) proactiveReply(ctx context.Context, groupID int64, mode string) {
-	if s.moodMgr == nil {
+	if s.moodMgr == nil || !s.groupAIEnabled(groupID) {
 		return
 	}
 	var prompt string
@@ -530,6 +534,9 @@ func (s *Service) proactiveReply(ctx context.Context, groupID int64, mode string
 		}
 	}
 	// 用当前模型生成
+	if !s.groupAIEnabled(groupID) {
+		return
+	}
 	lvl := s.models.ModelForLevel(levelMember)
 	cctx := WithModelOverride(ctx, lvl)
 	msg, err := s.client.Complete(cctx, msgs, nil)
@@ -542,6 +549,9 @@ func (s *Service) proactiveReply(ctx context.Context, groupID int64, mode string
 		return
 	}
 	// 发送到群
+	if !s.groupAIEnabled(groupID) {
+		return
+	}
 	if err := s.bot.Sender.SendGroupMsg(groupID, 0, []core.Segment{core.TextSegment(text)}); err != nil {
 		log.Printf("[mood] 主动回复发送失败: %v", err)
 		return
@@ -550,7 +560,7 @@ func (s *Service) proactiveReply(ctx context.Context, groupID int64, mode string
 	s.recordGroupMsg(groupID, "assistant", 0, text)
 	if s.session != nil {
 		if ses, serr := s.session.GetCurrent("group", groupID, 0, ""); serr == nil && ses != nil {
-			s.session.Append(ses.ID, []session.Message{{Role: "assistant", Content: text, Time: time.Now().Unix()}}, s.cfg.AI.MaxHistory)
+			s.session.Append(ses.ID, []session.Message{{Role: "assistant", Content: text, Time: time.Now().Unix()}}, 0)
 		}
 	}
 	log.Printf("[mood] 主动回复: %s", text)
