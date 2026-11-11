@@ -14,6 +14,10 @@ import (
 
 type qqMessageTarget struct{ groupID, userID int64 }
 
+func isQQOutputTool(name string) bool {
+	return name == "qq_send_message" || name == "qq_send_forward_message"
+}
+
 func (t qqMessageTarget) isCurrent(ev *core.Event) bool {
 	return ev != nil && ((ev.IsGroup() && t.groupID == ev.GroupID) ||
 		(ev.IsPrivate() && t.groupID == 0 && t.userID == ev.UserID))
@@ -95,8 +99,9 @@ func (s *Service) newQQMessageTool() Tool {
 
 type qqOutputKey struct{}
 type qqOutputState struct {
-	mu   sync.Mutex
-	sent map[qqMessageTarget]map[string]bool
+	mu       sync.Mutex
+	sent     map[qqMessageTarget]map[string]bool
+	forwards map[qqMessageTarget]map[[32]byte]bool
 }
 
 func qqAlreadySent(ctx context.Context, ev *core.Event, text string) bool {
@@ -176,7 +181,7 @@ func (s *Service) publishToolProgress(ctx context.Context, msg *Message) {
 	}
 	ev := core.EventFrom(ctx)
 	for _, tc := range msg.ToolCalls {
-		if tc.Function.Name != "qq_send_message" && tc.Function.Name != "send_multiple_messages" {
+		if !isQQOutputTool(tc.Function.Name) && tc.Function.Name != "send_multiple_messages" {
 			continue
 		}
 		if tc.Function.Name == "send_multiple_messages" {

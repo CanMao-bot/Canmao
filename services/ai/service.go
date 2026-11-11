@@ -92,7 +92,7 @@ func New(cfg *core.Config, p *perm.Store, s *session.Store, allowStore *allow.St
 	svc.approvals = NewApprovalManager(bot, 120*time.Second)
 	svc.approvals.SetAllowStore(allowStore)
 	svc.asker = NewAsker(bot, 300*time.Second)
-	svc.residentTools = []Tool{svc.newQQMessageTool()}
+	svc.residentTools = []Tool{svc.newQQMessageTool(), svc.newQQForwardTool()}
 	svc.backgroundJobs = make(chan backgroundJob, 32)
 	svc.registerBuiltinTools()
 	return svc
@@ -777,6 +777,7 @@ func (s *Service) systemPrompt() string {
 		"5. 你可以在普通对话、心情驱动插话中自然表达情绪, 但任何改变群内成员状态的操作都必须经过工具审批。"
 	base += "\n\n=== 即时沟通 ===\n" +
 		"qq_send_message 是始终可用的 QQ 输出工具，无需搜索接口。任务预计耗时较长时，先用它向当前会话说明接下来要做什么，关键阶段再简短报告进展；也可按授权指定群或私聊目标。" +
+		"qq_send_forward_message 同样常驻，需要把多段内容整理成一条合并转发（聊天记录）时直接调用，messages 数组每项对应一个文字节点，短内容也可以合并。" +
 		"把通知放在同一轮的耗时工具之前，减少额外模型往返。带工具调用的公开正文也会立即发给当前会话；若已用消息工具通知则不要重复正文。" +
 		"只报告简短的公开进度和已确认结果，不发送内部思考、凭据或原始工具参数，不在每次小操作时刷屏。工具已发送的内容无需在最终回复中重复。"
 	// 人设注入
@@ -898,7 +899,7 @@ func (s *Service) runAgent(ctx context.Context, messages []Message, ev *core.Eve
 		}
 	}
 	// No further task operations after the budget; output remains available.
-	cur = append(cur, NewTextMessage("system", "本轮操作预算已用尽，请根据已有结果收尾。仍可用 qq_send_message 通知进度，但不得声称未执行的操作已完成。"))
+	cur = append(cur, NewTextMessage("system", "本轮操作预算已用尽，请根据已有结果收尾。仍可用 qq_send_message 或 qq_send_forward_message 输出消息，但不得声称未执行的操作已完成。"))
 	if estimateRequestTokens(cur, s.residentTools) <= budget {
 		if err := s.checkRunGroupAI(ctx); err != nil {
 			return "", err
@@ -914,7 +915,7 @@ func (s *Service) runAgent(ctx context.Context, messages []Message, ev *core.Eve
 			return "", err
 		}
 		for _, tc := range msg.ToolCalls {
-			if tc.Function.Name == "qq_send_message" {
+			if isQQOutputTool(tc.Function.Name) {
 				s.executeTool(ctx, tc)
 			}
 		}

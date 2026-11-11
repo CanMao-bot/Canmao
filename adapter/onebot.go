@@ -316,10 +316,14 @@ func (o *OneBot) SendMessageWithReceipt(ctx context.Context, groupID, userID int
 	if err != nil {
 		return 0, err
 	}
+	return messageReceiptID(cr.Data)
+}
+
+func messageReceiptID(raw json.RawMessage) (int64, error) {
 	var data struct {
 		MessageID json.Number `json:"message_id"`
 	}
-	if err := json.Unmarshal(cr.Data, &data); err != nil {
+	if err := json.Unmarshal(raw, &data); err != nil {
 		return 0, err
 	}
 	id, err := data.MessageID.Int64()
@@ -331,6 +335,19 @@ func (o *OneBot) SendMessageWithReceipt(ctx context.Context, groupID, userID int
 
 // SendForwardMsg 发送合并转发消息
 func (o *OneBot) SendForwardMsg(groupID, userID int64, nodes []core.ForwardNode) error {
+	_, err := o.Call("send_forward_msg", forwardMessageParams(groupID, userID, nodes))
+	return err
+}
+
+func (o *OneBot) SendForwardWithReceipt(ctx context.Context, groupID, userID int64, nodes []core.ForwardNode) (int64, error) {
+	cr, err := o.CallContext(ctx, "send_forward_msg", forwardMessageParams(groupID, userID, nodes))
+	if err != nil {
+		return 0, err
+	}
+	return messageReceiptID(cr.Data)
+}
+
+func forwardMessageParams(groupID, userID int64, nodes []core.ForwardNode) map[string]interface{} {
 	// 转成 OneBot node 段格式
 	segments := make([]map[string]interface{}, 0, len(nodes))
 	for _, n := range nodes {
@@ -354,8 +371,7 @@ func (o *OneBot) SendForwardMsg(groupID, userID int64, nodes []core.ForwardNode)
 	} else {
 		params["user_id"] = userID
 	}
-	_, err := o.Call("send_forward_msg", params)
-	return err
+	return params
 }
 
 // core.Sender 接口实现

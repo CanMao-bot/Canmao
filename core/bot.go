@@ -60,6 +60,11 @@ type ForwardSender interface {
 	SendForwardMsg(groupID, userID int64, nodes []ForwardNode) error
 }
 
+// ForwardReceiptSender supports cancellation and returns the actual message ID.
+type ForwardReceiptSender interface {
+	SendForwardWithReceipt(ctx context.Context, groupID, userID int64, nodes []ForwardNode) (int64, error)
+}
+
 // MessageInfo 消息详情(get_msg)
 type MessageInfo struct {
 	MessageID  int64

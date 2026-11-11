@@ -82,7 +82,7 @@ func (localSchemaLoader) Load(url string) (interface{}, error) {
 func validateArguments(t Tool, raw string) (map[string]interface{}, error) {
 	var args map[string]interface{}
 	decode := json.Unmarshal
-	if t.Function.Name == "qq_call_api" || t.Function.Name == "qq_send_message" {
+	if t.Function.Name == "qq_call_api" || isQQOutputTool(t.Function.Name) {
 		decode = decodeQQJSON
 	}
 	if err := decode([]byte(raw), &args); err != nil {
@@ -132,7 +132,7 @@ func (s *Service) authorizeTool(ctx context.Context, t Tool, args map[string]int
 			return err
 		}
 	}
-	if t.Function.Name == "qq_send_message" {
+	if isQQOutputTool(t.Function.Name) {
 		if err := s.authorizeQQMessage(ctx, args); err != nil {
 			return err
 		}
@@ -210,7 +210,7 @@ func (s *Service) executeTool(ctx context.Context, tc ToolCall) (result string) 
 	}
 	ev := core.EventFrom(ctx)
 	risk, approvalKey := riskForToolCall(t, args)
-	if t.Function.Name == "qq_send_message" {
+	if isQQOutputTool(t.Function.Name) {
 		target, _ := qqMessageTargetFor(ev, args) // Already validated by authorizeTool.
 		if !target.isCurrent(ev) {
 			if risk < RiskMedium {
