@@ -48,8 +48,26 @@ type ApprovalRequest struct {
 	Risk      RiskLevel
 	Requester int64 // 发起人
 	GroupID   int64
+	Messages  []approvalMessage
 	Channel   chan ApprovalResult
 	ExpireAt  time.Time
+}
+
+type approvalMessage struct{ ID, GroupID, UserID int64 }
+
+func (p *ApprovalRequest) matchesReply(ev *core.Event) bool {
+	for _, msg := range p.Messages {
+		if msg.ID != ev.ReplyID() {
+			continue
+		}
+		if ev.IsGroup() && msg.GroupID == ev.GroupID && p.GroupID == ev.GroupID {
+			return true
+		}
+		if ev.IsPrivate() && msg.GroupID == 0 && msg.UserID == ev.UserID && p.GroupID == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type ApprovalResult struct {
@@ -77,7 +95,7 @@ func NewApprovalManager(bot *core.Bot, timeout time.Duration) *ApprovalManager {
 
 func (m *ApprovalManager) SetAllowStore(s *allow.Store) { m.allow = s }
 
-// NewSingleUseApprovalManager requires an explicit ID and never grants permanent authority.
+// NewSingleUseApprovalManager requires a quoted request and never grants permanent authority.
 func NewSingleUseApprovalManager(bot *core.Bot, timeout time.Duration) *ApprovalManager {
 	m := NewApprovalManager(bot, timeout)
 	m.singleUse = true
@@ -93,6 +111,12 @@ func approvalKey(ev *core.Event) string {
 
 // Request 发起审批, 阻塞等待结果
 func (m *ApprovalManager) Request(ctx context.Context, ev *core.Event, toolName string, args map[string]interface{}, risk RiskLevel) (*ApprovalResult, error) {
+	if ev == nil || ev.UserID <= 0 {
+		return nil, errNoEvent
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := approvalKey(ev)
 
 	m.mu.Lock()
@@ -125,23 +149,34 @@ func (m *ApprovalManager) Request(ctx context.Context, ev *core.Event, toolName 
 	// 发送审批请求消息
 	argsJSON, _ := json.Marshal(args)
 	approver := m.approverHint(req, ev)
-	msg := "⚠️ 【安全审核 #" + req.ID + "】\n" +
+	msg := "⚠️ 【安全审核】\n" +
 		"请求执行「" + toolName + "」(" + risk.String() + ")\n" +
 		"参数: `" + string(argsJSON) + "`\n" +
 		"需要 " + approver + " 确认。\n" +
-		"回复「同意 " + req.ID + "」继续, 「拒绝 " + req.ID + "」取消。\n" +
-		"永久授权请回复「以后都允许 " + req.ID + "」(授予发起人, 仅限本会话范围)。"
+		"请引用本条申请回复「同意」继续，或「拒绝」取消。\n" +
+		"永久授权：引用本条申请回复「以后都允许」（授予发起人，仅限本会话范围）。"
 	if m.singleUse {
-		msg = strings.Split(msg, "永久授权请回复")[0] + "本操作每次均需带编号审批，不接受永久授权。"
+		msg = strings.Split(msg, "永久授权：")[0] + "本操作每次均需引用申请确认，不接受永久授权。"
 	}
-
-	if ev.IsGroup() {
-		m.bot.Sender.SendGroupMsg(ev.GroupID, 0, []core.Segment{core.TextSegment(msg)})
-	} else {
-		m.bot.Sender.SendPrivateMsg(ev.UserID, []core.Segment{core.TextSegment(msg)})
+	send := func(target *core.Event, text string) error {
+		// Serialize receipt registration with Resolve so an immediate reply cannot
+		// race the API receipt. No other bot operation uses this mutex.
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		id, err := m.bot.SendTracked(ctx, target, text)
+		if err != nil {
+			return err
+		}
+		req.Messages = append(req.Messages, approvalMessage{ID: id, GroupID: target.GroupID, UserID: target.UserID})
+		return nil
+	}
+	if err := send(ev, msg); err != nil {
+		return nil, err
+	}
+	if !ev.IsGroup() {
 		if risk >= RiskHigh && m.bot.Cfg.Bot.MasterID != int64ToStr(ev.UserID) {
 			if owner, err := strconv.ParseInt(m.bot.Cfg.Bot.MasterID, 10, 64); err == nil && owner > 0 {
-				_ = m.bot.Sender.SendPrivateMsg(owner, []core.Segment{core.TextSegment("来自用户 " + int64ToStr(ev.UserID) + " 的审批请求:\n" + msg)})
+				_ = send(&core.Event{DetailType: "private", UserID: owner}, "来自用户 "+int64ToStr(ev.UserID)+" 的审批请求:\n"+msg)
 			}
 		}
 	}
@@ -159,53 +194,25 @@ func (m *ApprovalManager) Request(ctx context.Context, ev *core.Event, toolName 
 
 // Resolve 处理用户对审批请求的回复; 返回 true 表示消费了该消息
 func (m *ApprovalManager) Resolve(ev *core.Event) bool {
+	if ev == nil || ev.UserID <= 0 || ev.ReplyID() == 0 {
+		return false
+	}
 	text := strings.TrimSpace(ev.Text())
-	command, id := text, ""
-	if pos := strings.LastIndexAny(text, " \t"); pos >= 0 {
-		command, id = strings.TrimSpace(text[:pos]), strings.TrimPrefix(strings.TrimSpace(text[pos+1:]), "#")
-	}
-	approve, reject, always := isApprove(command), isReject(command), isAlwaysAllow(command)
-	// 不带编号的短回复仅用于无歧义的单次审批，不能授予永久权限。
-	if id == "" {
-		approve, reject, always = isApprove(text), isReject(text), false
-	}
+	approve, reject, always := isApprove(text), isReject(text), isAlwaysAllow(text)
 	if !approve && !reject && !always {
 		return false
 	}
-	if m.singleUse && (id == "" || always) {
+	if m.singleUse && always {
 		return false
 	}
 	m.mu.Lock()
 	var req *ApprovalRequest
-	ambiguous := false
 	for _, p := range m.pendings {
-		if time.Now().After(p.ExpireAt) || (id != "" && p.ID != id) {
+		if time.Now().After(p.ExpireAt) || !p.matchesReply(ev) {
 			continue
 		}
-		if ev.IsGroup() {
-			if p.GroupID != ev.GroupID || p.GroupID == 0 {
-				continue
-			}
-		} else {
-			if p.GroupID != 0 || (p.Requester != ev.UserID && !(id != "" && (m.bot.Cfg.Bot.MasterID == int64ToStr(ev.UserID) || isAdmin(m.bot, ev.UserID)))) {
-				continue
-			}
-		}
-		if id == "" {
-			if _, err := m.canApprove(p, ev); err != nil && p.Requester != ev.UserID {
-				continue
-			}
-		}
-		if req != nil {
-			ambiguous = true
-			break
-		}
 		req = p
-	}
-	if ambiguous {
-		m.mu.Unlock()
-		m.bot.Reply(ev, "有多个待审批请求，请回复「同意 编号」或「拒绝 编号」")
-		return true
+		break
 	}
 	if req == nil {
 		m.mu.Unlock()

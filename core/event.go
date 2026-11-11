@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -98,6 +99,13 @@ func (e *Event) ReplyID() int64 {
 			return id
 		case float64:
 			return int64(v)
+		case int64:
+			return v
+		case int:
+			return int64(v)
+		case json.Number:
+			id, _ := v.Int64()
+			return id
 		}
 	}
 	return 0

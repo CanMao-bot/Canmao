@@ -49,7 +49,7 @@ memory:
   embed_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 向量化 API
   embed_api_key: "YOUR_DASHSCOPE_API_KEY"
   embed_model: "text-embedding-v4"    # 向量模型
-  recall_limit: 5
+  recall_limit: 5                    # 当前用户与会话，最多20条/1800字；无向量服务时本地检索
   vision_model: ""                   # 仅 ai.image_mode=caption 时填写可用的识图转述模型
 
 mood:

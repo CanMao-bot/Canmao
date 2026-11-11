@@ -119,9 +119,14 @@ func main() {
 				APIKey:  cfg.Memory.EmbedAPIKey,
 				Model:   cfg.Memory.EmbedModel,
 			})
+			mode := "混合检索"
+			if !embedder.Configured() {
+				embedder = nil
+				mode = "本地中文检索"
+			}
 			memMgr := memory.New(memStore, embedder, cfg)
 			aiSvc.SetMemoryManager(memMgr)
-			log.Printf("[memory] 记忆机制已启用 (embed=%s)", cfg.Memory.EmbedModel)
+			log.Printf("[memory] 记忆机制已启用 (%s，按用户与会话隔离)", mode)
 		}
 	}
 	// 心情系统

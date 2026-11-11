@@ -305,6 +305,30 @@ func (o *OneBot) SendPrivateMsg(userID int64, msg []core.Segment) error {
 	return err
 }
 
+func (o *OneBot) SendMessageWithReceipt(ctx context.Context, groupID, userID int64, msg []core.Segment) (int64, error) {
+	action := "send_private_msg"
+	params := map[string]interface{}{"user_id": userID, "message": msg}
+	if groupID > 0 {
+		action = "send_group_msg"
+		params = map[string]interface{}{"group_id": groupID, "message": msg}
+	}
+	cr, err := o.CallContext(ctx, action, params)
+	if err != nil {
+		return 0, err
+	}
+	var data struct {
+		MessageID json.Number `json:"message_id"`
+	}
+	if err := json.Unmarshal(cr.Data, &data); err != nil {
+		return 0, err
+	}
+	id, err := data.MessageID.Int64()
+	if err != nil || id == 0 {
+		return 0, errors.New("发送消息未取得有效 message_id")
+	}
+	return id, nil
+}
+
 // SendForwardMsg 发送合并转发消息
 func (o *OneBot) SendForwardMsg(groupID, userID int64, nodes []core.ForwardNode) error {
 	// 转成 OneBot node 段格式

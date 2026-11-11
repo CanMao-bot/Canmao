@@ -17,25 +17,33 @@ type friendConfirmation struct {
 	owner     int64
 	expiresAt time.Time
 	result    chan bool
+	messageID int64
 }
 
 func (s *Service) HandleControl(ctx context.Context, bot *core.Bot, ev *core.Event) bool {
 	if ctx.Err() != nil || ev.Type != "message" || !ev.IsPrivate() || !s.master(ev.UserID) || !s.AllowEvent(ev) {
 		return false
 	}
-	f := strings.Fields(ev.Text())
-	if len(f) != 2 || (f[0] != "同意" && f[0] != "拒绝") {
+	command := strings.TrimSpace(ev.Text())
+	if ev.ReplyID() == 0 || (command != "同意" && command != "拒绝") {
 		return false
 	}
-	nonce := strings.TrimPrefix(f[1], "#")
 	s.friendMu.Lock()
-	req := s.friendRequests[nonce]
+	var req *friendConfirmation
+	var nonce string
+	for key, pending := range s.friendRequests {
+		if pending.messageID == ev.ReplyID() {
+			req = pending
+			nonce = key
+			break
+		}
+	}
 	if req == nil || req.owner != ev.UserID || !time.Now().Before(req.expiresAt) {
 		s.friendMu.Unlock()
 		return false
 	}
 	delete(s.friendRequests, nonce)
-	req.result <- f[0] == "同意"
+	req.result <- command == "同意"
 	s.friendMu.Unlock()
 	return true
 }
@@ -80,8 +88,11 @@ func (s *Service) friendRequest(ctx context.Context, ev *core.Event) bool {
 	if len(comment) > 500 {
 		comment = comment[:500]
 	}
-	msg := fmt.Sprintf("【好友申请 #%s】\n申请人：%d\n验证信息：%s\n请主人私聊回复「同意 %s」或「拒绝 %s」。", nonce, ev.UserID, string(comment), nonce, nonce)
-	if err = s.bot.Sender.SendPrivateMsg(owner, []core.Segment{core.TextSegment(msg)}); err != nil {
+	msg := fmt.Sprintf("【好友申请】\n申请人：%d\n验证信息：%s\n请主人引用本条消息回复「同意」或「拒绝」。", ev.UserID, string(comment))
+	s.friendMu.Lock()
+	req.messageID, err = s.bot.SendTracked(ctx, &core.Event{DetailType: "private", UserID: owner}, msg)
+	s.friendMu.Unlock()
+	if err != nil {
 		return true
 	}
 	timer := time.NewTimer(s.friendTimeout)

@@ -194,7 +194,7 @@ func TestDisabledAICannotExecutePendingApprovedTool(t *testing.T) {
 		}
 	}
 	s.HandleControl(context.Background(), s.bot, securityEvent(1, 10, "/ai off"))
-	s.approvals.Resolve(securityEvent(1, 10, "同意 "+nonce))
+	s.approvals.Resolve(quoteApproval(s, securityEvent(1, 10, "同意"), nonce))
 	select {
 	case result := <-done:
 		if effects != 0 || !strings.Contains(result, "AI 已关闭") {

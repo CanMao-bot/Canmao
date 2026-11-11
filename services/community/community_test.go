@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +29,15 @@ type mock struct {
 	leaves, adminChanges          int
 	friendApproved                bool
 	msg                           *core.MessageInfo
+	sequence                      atomic.Int64
+}
+
+func (m *mock) SendMessageWithReceipt(ctx context.Context, gid, uid int64, segs []core.Segment) (int64, error) {
+	id := m.sequence.Add(1)
+	if gid != 0 {
+		return id, m.SendGroupMsg(gid, uid, segs)
+	}
+	return id, m.SendPrivateMsg(uid, segs)
 }
 
 func (m *mock) SendGroupMsg(gid, uid int64, v []core.Segment) error {
@@ -611,24 +620,26 @@ func TestFriendConsentIsOwnerOnlyBusinessConfirmation(t *testing.T) {
 			}()
 			prompt := next(t, m)
 			text := textOf(prompt)
-			match := regexp.MustCompile(`好友申请 #([a-f0-9]{16})`).FindStringSubmatch(text)
-			if len(match) != 2 || prompt.uid != 1 || strings.Contains(text, "安全审核") || strings.Contains(text, "private-request-flag") {
+			if !strings.Contains(text, "引用本条消息") || strings.Contains(text, "好友申请 #") || prompt.uid != 1 || strings.Contains(text, "安全审核") || strings.Contains(text, "private-request-flag") {
 				t.Fatal("invalid business confirmation", text)
 			}
-			nonce := match[1]
-			for _, ev := range []*core.Event{event(3, 0, "同意 "+nonce), event(1, 10, "同意 "+nonce), event(1, 0, "同意"), event(1, 0, "以后都允许 "+nonce)} {
+			quote := func(ev *core.Event) *core.Event {
+				ev.Message = append([]core.Segment{{Type: "reply", Data: map[string]interface{}{"id": m.sequence.Load()}}}, ev.Message...)
+				return ev
+			}
+			for _, ev := range []*core.Event{quote(event(3, 0, "同意")), quote(event(1, 10, "同意")), event(1, 0, "同意"), quote(event(1, 0, "以后都允许"))} {
 				if s.HandleControl(context.Background(), s.bot, ev) {
 					t.Fatal("invalid friend confirmation accepted")
 				}
 			}
-			command := "拒绝 " + nonce
+			command := "拒绝"
 			if approve {
-				command = "同意 " + nonce
+				command = "同意"
 			}
-			if !s.HandleControl(context.Background(), s.bot, event(1, 0, command)) {
+			if !s.HandleControl(context.Background(), s.bot, quote(event(1, 0, command))) {
 				t.Fatal("owner consent not resolved")
 			}
-			if s.HandleControl(context.Background(), s.bot, event(1, 0, command)) {
+			if s.HandleControl(context.Background(), s.bot, quote(event(1, 0, command))) {
 				t.Fatal("friend consent replayed")
 			}
 			await(t, done)

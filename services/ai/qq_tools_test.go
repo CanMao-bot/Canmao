@@ -123,7 +123,7 @@ func TestQQApprovalFloorAliasesAndIsolation(t *testing.T) {
 	if calls != 0 {
 		t.Fatal("called before approval")
 	}
-	s.approvals.Resolve(securityEvent(1, 0, "以后都允许 "+req.ID))
+	s.approvals.Resolve(quoteApproval(s, securityEvent(1, 0, "以后都允许"), req.ID))
 	result := <-done
 	if !strings.Contains(result, `"success":true`) {
 		t.Fatal(result)
@@ -169,7 +169,7 @@ func TestQQGroupDisableCancelsApprovedOperation(t *testing.T) {
 	if err := s.perm.ConfigureGroupAI(7, 1, 1, perm.GroupAIPatch{Enabled: &off}); err != nil {
 		t.Fatal(err)
 	}
-	s.approvals.Resolve(securityEvent(1, 7, "同意 "+req.ID))
+	s.approvals.Resolve(quoteApproval(s, securityEvent(1, 7, "同意"), req.ID))
 	if result := <-done; !strings.Contains(result, "操作已取消") {
 		t.Fatal(result)
 	}
@@ -254,7 +254,7 @@ func TestQQRechecksAuthorityAfterApproval(t *testing.T) {
 	req := qqAwaitApproval(t, s, q)
 	// Change authority before waking the executor (no concurrent config access).
 	s.cfg.Bot.AdminIDs = nil
-	s.approvals.Resolve(securityEvent(1, 0, "同意 "+req.ID))
+	s.approvals.Resolve(quoteApproval(s, securityEvent(1, 0, "同意"), req.ID))
 	if result := <-done; !strings.Contains(result, "操作已取消") {
 		t.Fatal(result)
 	}

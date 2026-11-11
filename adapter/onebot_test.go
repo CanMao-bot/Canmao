@@ -201,3 +201,24 @@ func TestLegacyCallRejectsStreamAndConsumerError(t *testing.T) {
 		}
 	}
 }
+
+func TestTrackedSendReturnsRealMessageID(t *testing.T) {
+	for _, id := range []interface{}{int64(-123), "456", nil, int64(0)} {
+		o := localOneBot(t, func(conn *websocket.Conn) {
+			var req map[string]interface{}
+			if conn.ReadJSON(&req) != nil {
+				return
+			}
+			_ = respondQQ(conn, req["echo"], "ok", 0, map[string]interface{}{"message_id": id})
+			_, _, _ = conn.ReadMessage()
+		})
+		got, err := o.SendMessageWithReceipt(context.Background(), 7, 0, []core.Segment{core.TextSegment("test")})
+		valid := id != nil && id != int64(0)
+		if valid && (err != nil || got == 0) {
+			t.Fatal(got, err)
+		}
+		if !valid && err == nil {
+			t.Fatal("missing receipt accepted")
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,7 +19,40 @@ import (
 	"gobot/store/session"
 )
 
-type securitySender struct{ sent chan string }
+type securitySender struct {
+	sent     chan string
+	sequence atomic.Int64
+}
+
+func (s *securitySender) SendMessageWithReceipt(ctx context.Context, gid, uid int64, segs []core.Segment) (int64, error) {
+	id := s.sequence.Add(1)
+	return id, s.send(segs)
+}
+
+func quoteApproval(s *Service, ev *core.Event, id string) *core.Event {
+	// Internal request IDs are only used by tests to find the sent message.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.approvals.mu.Lock()
+		if p := s.approvals.pendings[id]; p != nil {
+			for _, msg := range p.Messages {
+				if (ev.IsGroup() && msg.GroupID == ev.GroupID) || (ev.IsPrivate() && msg.GroupID == 0 && msg.UserID == ev.UserID) {
+					ev.Message = append([]core.Segment{{Type: "reply", Data: map[string]interface{}{"id": msg.ID}}}, ev.Message...)
+					s.approvals.mu.Unlock()
+					return ev
+				}
+			}
+			if len(p.Messages) > 0 && (ev.IsGroup() || ev.UserID != 1) {
+				ev.Message = append([]core.Segment{{Type: "reply", Data: map[string]interface{}{"id": p.Messages[0].ID}}}, ev.Message...)
+				s.approvals.mu.Unlock()
+				return ev
+			}
+		}
+		s.approvals.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	return ev
+}
 
 func (s *securitySender) send(segs []core.Segment) error {
 	select {
@@ -120,7 +154,7 @@ func TestApprovalRoutesToOwnerAndGrantsRequester(t *testing.T) {
 	s := securityFixture(t)
 	requester := securityEvent(3, 7, "")
 	id, result := requestApproval(t, s, requester, RiskHigh)
-	if !s.approvals.Resolve(securityEvent(3, 7, "同意 "+id)) {
+	if !s.approvals.Resolve(quoteApproval(s, securityEvent(3, 7, "同意"), id)) {
 		t.Fatal("应处理无权批准的回复")
 	}
 	select {
@@ -128,13 +162,13 @@ func TestApprovalRoutesToOwnerAndGrantsRequester(t *testing.T) {
 		t.Fatal("发起人自批不得结束审批")
 	default:
 	}
-	if s.approvals.Resolve(securityEvent(1, 8, "同意 "+id)) {
+	if s.approvals.Resolve(quoteApproval(s, securityEvent(1, 8, "同意"), id)) {
 		t.Fatal("不允许跨群批准")
 	}
-	if s.approvals.Resolve(securityEvent(1, 7, "不要以后都允许 "+id)) {
+	if s.approvals.Resolve(quoteApproval(s, securityEvent(1, 7, "不要以后都允许"), id)) {
 		t.Fatal("否定句不得授权")
 	}
-	if !s.approvals.Resolve(securityEvent(1, 7, "以后都允许 "+id)) {
+	if !s.approvals.Resolve(quoteApproval(s, securityEvent(1, 7, "以后都允许"), id)) {
 		t.Fatal("主人应能定位成员请求")
 	}
 	select {
@@ -159,7 +193,7 @@ func TestApprovalRoutesToOwnerAndGrantsRequester(t *testing.T) {
 func TestCriticalPrivateApprovalAndAmbiguousGroupRequests(t *testing.T) {
 	s := securityFixture(t)
 	id, result := requestApproval(t, s, securityEvent(3, 0, ""), RiskCritical)
-	if !s.approvals.Resolve(securityEvent(1, 0, "同意 "+id)) {
+	if !s.approvals.Resolve(quoteApproval(s, securityEvent(1, 0, "同意"), id)) {
 		t.Fatal("主人应能以编号批准私聊请求")
 	}
 	if res := <-result; !res.Approved {
@@ -169,14 +203,14 @@ func TestCriticalPrivateApprovalAndAmbiguousGroupRequests(t *testing.T) {
 	<-s.bot.Sender.(*securitySender).sent
 	id1, r1 := requestApproval(t, s, securityEvent(3, 7, ""), RiskHigh)
 	id2, r2 := requestApproval(t, s, securityEvent(4, 7, ""), RiskHigh)
-	if !s.approvals.Resolve(securityEvent(1, 7, "同意")) {
+	if s.approvals.Resolve(securityEvent(1, 7, "同意")) {
 		t.Fatal("应提示指定编号")
 	}
 	if s.approvals.Debug() != 2 {
 		t.Fatal("模糊回复不能批准任意请求")
 	}
-	s.approvals.Resolve(securityEvent(1, 7, "同意 "+id1))
-	s.approvals.Resolve(securityEvent(1, 7, "拒绝 "+id2))
+	s.approvals.Resolve(quoteApproval(s, securityEvent(1, 7, "同意"), id1))
+	s.approvals.Resolve(quoteApproval(s, securityEvent(1, 7, "拒绝"), id2))
 	if !(<-r1).Approved || (<-r2).Approved {
 		t.Fatal("编号审批结果错误")
 	}
@@ -281,7 +315,7 @@ func TestAgentHighRiskToolStillRequiresApprovalForPrivilegedRequester(t *testing
 				nonce = req.ID
 			}
 			s.approvals.mu.Unlock()
-			if nonce == "" || !s.approvals.Resolve(securityEvent(uid, 7, "同意 "+nonce)) {
+			if nonce == "" || !s.approvals.Resolve(quoteApproval(s, securityEvent(uid, 7, "同意"), nonce)) {
 				t.Fatal("Agent approval not resolved")
 			}
 			select {
@@ -575,7 +609,7 @@ func TestAskAnswersBypassConversationLockAndKeepQuestionNumbers(t *testing.T) {
 func TestRequesterCanCancelOwnHighRiskRequest(t *testing.T) {
 	s := securityFixture(t)
 	id, result := requestApproval(t, s, securityEvent(3, 7, ""), RiskHigh)
-	if !s.approvals.Resolve(securityEvent(3, 7, "拒绝 "+id)) {
+	if !s.approvals.Resolve(quoteApproval(s, securityEvent(3, 7, "拒绝"), id)) {
 		t.Fatal("发起人应能取消")
 	}
 	select {

@@ -16,6 +16,28 @@ type Sender interface {
 	SendPrivateMsg(userID int64, msg []Segment) error
 }
 
+// ReceiptSender returns the real message ID for workflows resolved by quoting
+// a bot message. Implementations must not synthesize IDs or guess the recipient.
+type ReceiptSender interface {
+	SendMessageWithReceipt(ctx context.Context, groupID, userID int64, msg []Segment) (int64, error)
+}
+
+func (b *Bot) SendTracked(ctx context.Context, ev *Event, text string) (int64, error) {
+	sender, ok := b.Sender.(ReceiptSender)
+	if !ok {
+		return 0, errors.New("当前连接不支持消息回执，无法创建可引用的申请")
+	}
+	gid := int64(0)
+	if ev.IsGroup() {
+		gid = ev.GroupID
+	}
+	id, err := sender.SendMessageWithReceipt(ctx, gid, ev.UserID, []Segment{TextSegment(text)})
+	if err == nil && id == 0 {
+		return 0, errors.New("发送申请未取得有效消息回执")
+	}
+	return id, err
+}
+
 // QQAPIClient exposes native OneBot actions. Stream callbacks receive intermediate
 // data frames; the returned data is always the final API response.
 type QQAPIClient interface {

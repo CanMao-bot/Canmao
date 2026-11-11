@@ -20,9 +20,9 @@
   - `acp/` — ACP 客户端，spawn `opencode acp` 子进程走 stdio JSON-RPC。
   - `dashscope/` — 图像生成(qwen-image-2.0) + TTS(qwen3-tts-flash)。
   - `file/` — 文件保存/上传 + read_file/write_file/list_directory 工具。
-  - `groupreq/` — 入群申请管理（bot 是群管理时群内发申请卡片，`/同意 N` `/拒绝 N [理由]` `/入群申请` 审批）。
+  - `groupreq/` — 入群申请管理（bot 是群管理时群内发申请卡片，引用回复“同意”或“拒绝 [理由]”，`/入群申请` 重发卡片）。
   - `mcp/` — MCP 客户端（stdio 传输，mcp-go）。
-  - `memory/` — 向量记忆（embedding 检索）。
+  - `memory/` — 长期记忆（按真实用户和会话隔离，关键词/向量混合召回，事实更新与遗忘）。
   - `plugin/` + `pluginapi/` — .so 插件加载。示例在 `examples/`。
   - `sched/` — 定时任务。
   - `shell/` — `run_command` 系统命令工具。

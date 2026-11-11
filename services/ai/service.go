@@ -351,15 +351,17 @@ func (s *Service) registerBuiltinTools() {
 	s.tools = append(s.tools, multiTool)
 
 	// AI 主动记忆工具: AI 可自行决定保存某件事到记忆
-	if s.cfg.Mood.RememberTool {
+	if s.cfg.Memory.Enabled || s.cfg.Mood.RememberTool {
 		rememberTool := NewTool("remember", "主动记住一条重要信息(用户偏好、约定、事实等), 保存到长期记忆供以后检索。当对话中出现值得记住的用户信息时使用。",
 			map[string]*ToolParam{
 				"content": {Type: "string", Description: "要记住的信息内容"},
+				"key":     {Type: "string", Description: "可选，稳定事实键，例如 profile:name；同一用户当前会话中同键更新旧事实。不可填其他用户身份。"},
 			}, []string{"content"},
 			s.rememberCallback,
 		)
 		rememberTool.Risk = RiskLow
 		s.tools = append(s.tools, rememberTool)
+		s.registerMemoryTools()
 	}
 
 	// 按消息ID查看消息内容(引用/历史消息)
@@ -381,11 +383,12 @@ func (s *Service) rememberCallback(ctx context.Context, args map[string]interfac
 	if content == "" || s.memory == nil {
 		return "记忆功能不可用", nil
 	}
-	scope, gid, uid := s.sessionScope(ev)
-	if err := s.memory.Save(ctx, scope, gid, uid, content); err != nil {
-		return "记忆保存失败: " + err.Error(), nil
+	scope, gid, uid := memoryScope(ev)
+	key, _ := args["key"].(string)
+	if err := s.memory.SaveFact(ctx, scope, gid, uid, content, key, ev.MessageID); err != nil {
+		return "", err
 	}
-	return "✅ 已记住: " + content, nil
+	return "✅ 已记住（仅当前用户与会话）: " + content, nil
 }
 
 func (s *Service) askCallback(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -624,8 +627,8 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 	// 记忆检索: 将相关记忆注入上下文
 	memText := ""
 	if s.memory != nil {
-		scope, gid, uid := s.sessionScope(ev)
-		if mt, err := s.memory.Recall(ctx, scope, gid, uid, userContent, s.cfg.Memory.RecallLimit); err == nil && mt != "" {
+		scope, gid, uid := memoryScope(ev)
+		if mt, err := s.memory.Recall(ctx, scope, gid, uid, ev.Text(), s.cfg.Memory.RecallLimit); err == nil && mt != "" {
 			memText = mt
 			log.Printf("[ai] 检索到记忆: %d 条", countLines(mt))
 		} else if err != nil {
