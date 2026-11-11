@@ -83,7 +83,17 @@ func securityFixture(t *testing.T) *Service {
 	bot := core.NewBot(cfg)
 	bot.SetSender(&securitySender{sent: make(chan string, 100)})
 	svc := New(cfg, p, st, a, bot)
-	t.Cleanup(func() { bot.Shutdown(); a.Close(); st.Close(); p.Close() })
+	t.Cleanup(func() {
+		bot.Shutdown()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := bot.Wait(ctx); err != nil {
+			t.Error(err)
+		}
+		a.Close()
+		st.Close()
+		p.Close()
+	})
 	return svc
 }
 

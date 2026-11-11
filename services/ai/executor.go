@@ -17,7 +17,7 @@ type toolSetKey struct{}
 
 func (s *Service) requestTools(ctx context.Context) []Tool {
 	if tools, ok := ctx.Value(toolSetKey{}).([]Tool); ok {
-		return tools
+		return s.withResidentTools(tools)
 	}
 	return s.toolsSnapshot()
 }
@@ -82,7 +82,7 @@ func (localSchemaLoader) Load(url string) (interface{}, error) {
 func validateArguments(t Tool, raw string) (map[string]interface{}, error) {
 	var args map[string]interface{}
 	decode := json.Unmarshal
-	if t.Function.Name == "qq_call_api" {
+	if t.Function.Name == "qq_call_api" || t.Function.Name == "qq_send_message" {
 		decode = decodeQQJSON
 	}
 	if err := decode([]byte(raw), &args); err != nil {
@@ -129,6 +129,11 @@ func (s *Service) authorizeTool(ctx context.Context, t Tool, args map[string]int
 	}
 	if t.Function.Name == "qq_call_api" {
 		if err := s.authorizeQQCall(ctx, args); err != nil {
+			return err
+		}
+	}
+	if t.Function.Name == "qq_send_message" {
+		if err := s.authorizeQQMessage(ctx, args); err != nil {
 			return err
 		}
 	}
@@ -205,6 +210,19 @@ func (s *Service) executeTool(ctx context.Context, tc ToolCall) (result string) 
 	}
 	ev := core.EventFrom(ctx)
 	risk, approvalKey := riskForToolCall(t, args)
+	if t.Function.Name == "qq_send_message" {
+		target, _ := qqMessageTargetFor(ev, args) // Already validated by authorizeTool.
+		if !target.isCurrent(ev) {
+			if risk < RiskMedium {
+				risk = RiskMedium
+			}
+			if target.groupID > 0 {
+				approvalKey += "/group/" + fmtID(target.groupID)
+			} else {
+				approvalKey += "/private/" + fmtID(target.userID)
+			}
+		}
+	}
 	if risk > RiskLow && !s.approvals.IsAllowedFor(ev, approvalKey, risk) {
 		if err = update("awaiting_approval"); err != nil {
 			return "审批状态保存失败: " + err.Error()
@@ -234,6 +252,10 @@ func (s *Service) executeTool(ctx context.Context, tc ToolCall) (result string) 
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	started := time.Now()
+	defer func() {
+		log.Printf("[ai] tool_timing name=%s elapsed_ms=%d status=%s", t.Function.Name, time.Since(started).Milliseconds(), status)
+	}()
 	result, err = t.Callback(toolCtx, args)
 	if err != nil {
 		if result != "" {

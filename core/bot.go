@@ -153,6 +153,7 @@ type Bot struct {
 	stopped      bool
 	routers      sync.WaitGroup
 	workers      sync.WaitGroup
+	background   sync.WaitGroup
 }
 
 // maxDispatchConcurrency 全局并发事件处理上限。
@@ -182,9 +183,25 @@ func (b *Bot) Run() {}
 
 func (b *Bot) Shutdown() { b.mu.Lock(); b.stopped = true; b.cancel(); b.mu.Unlock() }
 
+// GoBackground registers a bounded service worker in the bot's shutdown lifecycle.
+// The caller owns queue/concurrency limits; no new worker starts after Shutdown.
+func (b *Bot) GoBackground(fn func(context.Context)) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped {
+		return false
+	}
+	b.background.Add(1)
+	go func() {
+		defer b.background.Done()
+		fn(b.ctx)
+	}()
+	return true
+}
+
 func (b *Bot) Wait(ctx context.Context) error {
 	done := make(chan struct{})
-	go func() { b.routers.Wait(); b.workers.Wait(); close(done) }()
+	go func() { b.routers.Wait(); b.workers.Wait(); b.background.Wait(); close(done) }()
 	select {
 	case <-done:
 		return nil

@@ -308,6 +308,9 @@ func (m *MoodManager) DetectAndApplyContext(ctx context.Context, text string) *m
 	// AI 情感判断
 	if m.llm != nil {
 		res, err := m.llm(ctx, trimmed)
+		if ctx.Err() != nil {
+			return nil
+		}
 		if err == nil && (res.Delta != 0 || res.Emotion != "") {
 			emotion := res.Emotion
 			if emotion == "" {

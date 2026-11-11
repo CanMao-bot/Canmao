@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gobot/core"
@@ -104,11 +105,16 @@ func (s *Service) fetchGroupMeta(groupID int64) string {
 	if !ok {
 		return ""
 	}
-	selfID := s.selfID()
+	info, _ := gac.GetGroupMemberInfo(groupID, s.selfID())
+	list, _ := gac.GetGroupMemberList(groupID)
+	return formatGroupMeta(s.selfID(), info, list)
+}
+
+func formatGroupMeta(selfID int64, info map[string]interface{}, list []map[string]interface{}) string {
 	var b strings.Builder
 
 	// 自己在群里的身份/群昵称/头衔
-	if info, err := gac.GetGroupMemberInfo(groupID, selfID); err == nil {
+	if info != nil {
 		role, _ := info["role"].(string)
 		card, _ := info["card"].(string)
 		title, _ := info["title"].(string)
@@ -123,7 +129,7 @@ func (s *Service) fetchGroupMeta(groupID int64) string {
 	}
 
 	// 群主/管理员名单(不含自己)
-	if list, err := gac.GetGroupMemberList(groupID); err == nil {
+	if list != nil {
 		var owners, admins []string
 		adminTotal := 0
 		for _, m := range list {
@@ -157,6 +163,94 @@ func (s *Service) fetchGroupMeta(groupID int64) string {
 		}
 	}
 	return b.String()
+}
+
+// Environment enrichment must not consume three consecutive OneBot timeouts.
+// Native calls run concurrently with one shared two-second deadline; stale cached
+// values survive failures. Legacy senders retain their existing compatibility path.
+func (s *Service) groupEnvironment(ctx context.Context, groupID int64, wantMeta bool) (string, string) {
+	client, ok := s.bot.Sender.(core.QQAPIClient)
+	if !ok {
+		meta := ""
+		if wantMeta {
+			meta = s.groupMetaOf(groupID)
+		}
+		return s.groupNameOf(groupID), meta
+	}
+	s.groupMu.Lock()
+	nameCache, nameOK := s.groupNames[groupID]
+	metaCache, metaOK := s.groupMetas[groupID]
+	s.groupMu.Unlock()
+	if !wantMeta {
+		metaCache = cachedGroupMeta{}
+	}
+	needName := !nameOK || time.Since(nameCache.at) >= groupMetaTTL
+	needMeta := wantMeta && (!metaOK || time.Since(metaCache.at) >= groupMetaTTL)
+	if !needName && !needMeta {
+		return nameCache.name, metaCache.text
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	var info map[string]interface{}
+	var members []map[string]interface{}
+	var name map[string]interface{}
+	var nameErr, infoErr, listErr error
+	call := func(action string, params map[string]interface{}, dst interface{}) error {
+		raw, err := client.CallQQAPI(ctx, action, params, nil)
+		if err != nil {
+			return err
+		}
+		return decodeQQJSON(raw, dst)
+	}
+	if needName {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			nameErr = call("get_group_info", map[string]interface{}{"group_id": groupID}, &name)
+		}()
+	}
+	if needMeta {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			infoErr = call("get_group_member_info", map[string]interface{}{"group_id": groupID, "user_id": s.selfID()}, &info)
+		}()
+		go func() {
+			defer wg.Done()
+			listErr = call("get_group_member_list", map[string]interface{}{"group_id": groupID}, &members)
+		}()
+	}
+	wg.Wait()
+	s.groupMu.Lock()
+	defer s.groupMu.Unlock()
+	if s.groupNames == nil {
+		s.groupNames = map[int64]cachedGroupName{}
+	}
+	if s.groupMetas == nil {
+		s.groupMetas = map[int64]cachedGroupMeta{}
+	}
+	if needName {
+		at := time.Now()
+		if nameErr == nil {
+			nameCache.name, _ = name["group_name"].(string)
+		} else {
+			at = at.Add(-groupMetaTTL + 15*time.Second)
+		}
+		nameCache.at = at
+		s.groupNames[groupID] = nameCache
+	}
+	if needMeta {
+		at := time.Now()
+		if infoErr == nil && listErr == nil {
+			metaCache.text = formatGroupMeta(s.selfID(), info, members)
+		} else {
+			at = at.Add(-groupMetaTTL + 15*time.Second)
+		}
+		metaCache.at = at
+		s.groupMetas[groupID] = metaCache
+	}
+	return nameCache.name, metaCache.text
 }
 
 // registerMemberInfoTool 注册群成员信息查询工具(他人头衔/身份等按需查询)
