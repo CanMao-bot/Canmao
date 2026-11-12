@@ -16,6 +16,9 @@ func (s *Service) prepareUserMessage(ctx context.Context, text string, images []
 	if len(images) == 0 {
 		return NewTextMessage("user", text), text, nil
 	}
+	if strings.TrimSpace(text) == "" {
+		text = "用户发送了图片，请根据图片内容回应。"
+	}
 	mode := s.cfg.AI.ImageMode
 	if mode == "" {
 		mode = "native"

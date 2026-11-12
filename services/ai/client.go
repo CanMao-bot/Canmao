@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"gobot/core"
@@ -212,6 +215,12 @@ func modelFromCtx(ctx context.Context) string {
 
 // Complete 返回模型完整回复消息(可能含 ToolCalls)
 func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
+	// Retries share the original request deadline instead of doubling the timeout.
+	if c.cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(c.cfg.Timeout)*time.Second)
+		defer cancel()
+	}
 	baseURL, apiKey, model, proxy := c.endpoint()
 	if endpoint, ok := ctx.Value(endpointKey{}).(requestEndpoint); ok {
 		baseURL, apiKey, model, proxy = endpoint.BaseURL, endpoint.APIKey, endpoint.Model, endpoint.Proxy
@@ -240,26 +249,13 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool)
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-
 	client := c.http
 	if proxy != "" {
 		client = httpClientFor(proxy, time.Duration(c.cfg.Timeout)*time.Second)
 	}
-	resp, err := client.Do(httpReq)
+	respBody, err := requestModel(ctx, client, baseURL+"/chat/completions", apiKey, body)
 	if err != nil {
-		return nil, fmt.Errorf("调用 LLM API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM API 返回 %d: %s", resp.StatusCode, string(respBody))
+		return nil, err
 	}
 
 	var result struct {
@@ -282,4 +278,50 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool)
 		return nil, fmt.Errorf("模型未返回可显示的正文")
 	}
 	return &msg, nil
+}
+
+// Only incomplete transport responses are retried. No tools have executed at this
+// boundary; HTTP rejections, invalid model output and cancellation are not retried.
+func requestModel(ctx context.Context, client *http.Client, endpoint, apiKey string, body []byte) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		data, err := requestModelOnce(ctx, client, endpoint, apiKey, body)
+		interrupted := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err == nil || attempt == 1 || !interrupted {
+			return data, err
+		}
+		log.Printf("[ai] model_retry attempt=2 reason=connection_interrupted")
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("LLM 请求未完成")
+}
+
+func requestModelOnce(ctx context.Context, client *http.Client, endpoint, apiKey string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 LLM API: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("LLM API 返回 %d: %s", resp.StatusCode, string(data))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取 LLM 响应: %w", err)
+	}
+	return data, nil
 }

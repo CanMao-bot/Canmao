@@ -582,7 +582,7 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 	}
 
 	// 群聊 @ 解析: [CQ:at,qq=xxx] → [@昵称(xxx)], 让模型知道谁被提及
-	userContent := ev.RawMessage
+	userContent := eventUserContent(ev)
 	if ev.IsGroup() && core.FeatureOn(s.cfg.Features.AtParse) {
 		userContent = s.resolveAtMentions(ev, userContent)
 	}
@@ -599,6 +599,13 @@ func (s *Service) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 	}
 
 	// 群内合并会话时, 消息加上发送者标识让 AI 区分用户
+	userContent = describeSparseInput(userContent)
+	if strings.TrimSpace(userContent) == "" && len(quoteImages) == 0 && !eventHasImage(ev) {
+		if !ev.IsGroup() || s.groupAIEnabled(ev.GroupID) {
+			bot.Reply(ev, "请发来文字或图片，我再继续。")
+		}
+		return true
+	}
 	if ev.IsGroup() && s.cfg.AI.SessionMode == "merged" {
 		userContent = fmt.Sprintf("[用户%d] %s", ev.UserID, userContent)
 	}
