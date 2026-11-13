@@ -13,12 +13,14 @@ import (
 
 // Entry 一条永久信任记录
 type Entry struct {
-	ID        int64
-	Scope     string // "group" / "private"
-	GroupID   int64
-	UserID    int64
-	ToolName  string
-	CreatedAt int64
+	ID         int64
+	Scope      string // "group" / "private"
+	GroupID    int64
+	UserID     int64
+	ToolName   string
+	CreatedAt  int64
+	ApprovedBy int64
+	Risk       int
 }
 
 // Store 管理"以后都允许"的免审批记录
@@ -38,13 +40,16 @@ func New(dataDir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS allowlist (
+	// v2 不沿用旧版可能由发起人自行授予的高风险权限。
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS allowlist_v2 (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		scope TEXT NOT NULL,
 		group_id INTEGER NOT NULL DEFAULT 0,
 		user_id INTEGER NOT NULL DEFAULT 0,
 		tool_name TEXT NOT NULL,
 		created_at INTEGER DEFAULT 0,
+		approved_by INTEGER NOT NULL DEFAULT 0,
+		risk INTEGER NOT NULL DEFAULT 0,
 		UNIQUE(scope, group_id, user_id, tool_name)
 	)`); err != nil {
 		db.Close()
@@ -59,7 +64,7 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) IsAllowed(scope string, groupID, userID int64, toolName string) bool {
 	var id int64
 	err := s.db.QueryRow(
-		`SELECT id FROM allowlist WHERE scope=? AND group_id=? AND user_id=? AND tool_name=?`,
+		`SELECT id FROM allowlist_v2 WHERE scope=? AND group_id=? AND user_id=? AND tool_name=?`,
 		scope, groupID, userID, toolName).Scan(&id)
 	return err == nil
 }
@@ -69,7 +74,7 @@ func (s *Store) Add(scope string, groupID, userID int64, toolName string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO allowlist(scope, group_id, user_id, tool_name, created_at) VALUES(?,?,?,?,?)`,
+		`INSERT OR IGNORE INTO allowlist_v2(scope, group_id, user_id, tool_name, created_at) VALUES(?,?,?,?,?)`,
 		scope, groupID, userID, toolName, time.Now().Unix())
 	return err
 }
@@ -79,14 +84,14 @@ func (s *Store) Revoke(scope string, groupID, userID int64, toolName string) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
-		`DELETE FROM allowlist WHERE scope=? AND group_id=? AND user_id=? AND tool_name=?`,
+		`DELETE FROM allowlist_v2 WHERE scope=? AND group_id=? AND user_id=? AND tool_name=?`,
 		scope, groupID, userID, toolName)
 	return err
 }
 
 // ListByTool 列出某工具名下的所有信任记录
 func (s *Store) ListByTool(toolName string) ([]Entry, error) {
-	rows, err := s.db.Query(`SELECT id, scope, group_id, user_id, tool_name, created_at FROM allowlist WHERE tool_name=?`, toolName)
+	rows, err := s.db.Query(`SELECT id, scope, group_id, user_id, tool_name, created_at FROM allowlist_v2 WHERE tool_name=?`, toolName)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +110,7 @@ func (s *Store) ListByTool(toolName string) ([]Entry, error) {
 // AllList 列出某作用域下该用户的所有信任记录
 func (s *Store) AllList(scope string, groupID, userID int64) ([]Entry, error) {
 	rows, err := s.db.Query(
-		`SELECT id, scope, group_id, user_id, tool_name, created_at FROM allowlist WHERE scope=? AND group_id=? AND user_id=?`,
+		`SELECT id, scope, group_id, user_id, tool_name, created_at FROM allowlist_v2 WHERE scope=? AND group_id=? AND user_id=?`,
 		scope, groupID, userID)
 	if err != nil {
 		return nil, err
@@ -120,4 +125,17 @@ func (s *Store) AllList(scope string, groupID, userID int64) ([]Entry, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) Grant(scope string, groupID, userID int64, name string, approvedBy int64, risk int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO allowlist_v2(scope,group_id,user_id,tool_name,created_at,approved_by,risk) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope,group_id,user_id,tool_name) DO UPDATE SET approved_by=excluded.approved_by,risk=excluded.risk,created_at=excluded.created_at`, scope, groupID, userID, name, time.Now().Unix(), approvedBy, risk)
+	return err
+}
+
+func (s *Store) Lookup(scope string, groupID, userID int64, name string) (*Entry, error) {
+	var e Entry
+	err := s.db.QueryRow(`SELECT id,scope,group_id,user_id,tool_name,created_at,approved_by,risk FROM allowlist_v2 WHERE scope=? AND group_id=? AND user_id=? AND tool_name=?`, scope, groupID, userID, name).Scan(&e.ID, &e.Scope, &e.GroupID, &e.UserID, &e.ToolName, &e.CreatedAt, &e.ApprovedBy, &e.Risk)
+	return &e, err
 }

@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ type Session struct {
 	Messages  []Message
 	CreatedAt int64
 	UpdatedAt int64
+	Revision  int64
 }
 
 type Store struct {
@@ -77,6 +79,35 @@ func New(dataDir string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("初始化会话表: %w", err)
 		}
+	}
+	// 老数据库以增量迁移补齐上下文版本；所有上下文写入均递增此版本。
+	rows, err := db.Query(`PRAGMA table_info(sessions)`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	hasRevision := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def interface{}
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			rows.Close()
+			db.Close()
+			return nil, err
+		}
+		hasRevision = hasRevision || name == "revision"
+	}
+	rows.Close()
+	if !hasRevision {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if err := s.initRuns(); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return s, nil
 }
@@ -225,11 +256,17 @@ func (s *Store) GetCurrent(scope string, groupID, userID int64, defaultTitle str
 	var curID int64
 	err := s.db.QueryRow(`SELECT current_id FROM session_state WHERE scope=? AND group_id=? AND user_id=?`,
 		scope, groupID, userID).Scan(&curID)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
 	if err == sql.ErrNoRows || curID == 0 {
 		return s.createLocked(scope, groupID, userID, defaultTitle)
 	}
 	ses, err := s.getByIDLocked(curID)
-	if err != nil || ses == nil {
+	if err != nil {
+		return nil, err
+	}
+	if ses == nil || !ses.BelongsTo(scope, groupID, userID) {
 		return s.createLocked(scope, groupID, userID, defaultTitle)
 	}
 	return ses, nil
@@ -291,8 +328,8 @@ func (s *Store) getByIDLocked(id int64) (*Session, error) {
 	var se Session
 	var raw string
 	err := s.db.QueryRow(
-		`SELECT id, scope, group_id, user_id, title, summary, messages, created_at, updated_at FROM sessions WHERE id=?`,
-		id).Scan(&se.ID, &se.Scope, &se.GroupID, &se.UserID, &se.Title, &se.Summary, &raw, &se.CreatedAt, &se.UpdatedAt)
+		`SELECT id, scope, group_id, user_id, title, summary, messages, created_at, updated_at, revision FROM sessions WHERE id=?`,
+		id).Scan(&se.ID, &se.Scope, &se.GroupID, &se.UserID, &se.Title, &se.Summary, &raw, &se.CreatedAt, &se.UpdatedAt, &se.Revision)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -309,7 +346,14 @@ func (s *Store) getByIDLocked(id int64) (*Session, error) {
 func (s *Store) Switch(scope string, groupID, userID, id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO session_state(scope, group_id, user_id, current_id) VALUES(?,?,?,?)`,
+	se, err := s.getByIDLocked(id)
+	if err != nil {
+		return err
+	}
+	if se == nil || !se.BelongsTo(scope, groupID, userID) {
+		return ErrNotOwned
+	}
+	_, err = s.db.Exec(`INSERT OR REPLACE INTO session_state(scope, group_id, user_id, current_id) VALUES(?,?,?,?)`,
 		scope, groupID, userID, id)
 	return err
 }
@@ -327,12 +371,12 @@ func (s *Store) Append(id int64, msgs []Message, maxWindow int) error {
 		se.Messages = se.Messages[len(se.Messages)-maxWindow:]
 	}
 	raw, _ := json.Marshal(se.Messages)
-	_, err = s.db.Exec(`UPDATE sessions SET messages=?, updated_at=? WHERE id=?`,
+	_, err = s.db.Exec(`UPDATE sessions SET messages=?, updated_at=?, revision=revision+1 WHERE id=?`,
 		string(raw), time.Now().Unix(), id)
 	return err
 }
 
-// SetSummary 合并新摘要进 summary
+// SetSummary 替换摘要；空串明确表示清除。
 func (s *Store) SetSummary(id int64, newSummary string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,13 +384,8 @@ func (s *Store) SetSummary(id int64, newSummary string) error {
 	if err != nil || se == nil {
 		return fmt.Errorf("会话不存在: %w", err)
 	}
-	combined := se.Summary
-	if combined != "" && newSummary != "" {
-		combined += "\n"
-	}
-	combined += newSummary
-	_, err = s.db.Exec(`UPDATE sessions SET summary=?, updated_at=? WHERE id=?`,
-		combined, time.Now().Unix(), id)
+	_, err = s.db.Exec(`UPDATE sessions SET summary=?, updated_at=?, revision=revision+1 WHERE id=?`,
+		newSummary, time.Now().Unix(), id)
 	return err
 }
 
@@ -355,7 +394,7 @@ func (s *Store) ReplaceMessages(id int64, msgs []Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	raw, _ := json.Marshal(msgs)
-	_, err := s.db.Exec(`UPDATE sessions SET messages=?, updated_at=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE sessions SET messages=?, updated_at=?, revision=revision+1 WHERE id=?`,
 		string(raw), time.Now().Unix(), id)
 	return err
 }
@@ -373,5 +412,77 @@ func (s *Store) Delete(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE id=?`, id)
+	return err
+}
+
+var ErrNotOwned = errors.New("资源不存在或不属于当前会话")
+var ErrConflict = errors.New("会话已变化，请重新读取后重试")
+
+func (se *Session) BelongsTo(scope string, groupID, userID int64) bool {
+	return se.Scope == scope && se.GroupID == groupID && se.UserID == userID
+}
+
+func (s *Store) GetScoped(id int64, scope string, groupID, userID int64) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	se, err := s.getByIDLocked(id)
+	if err != nil {
+		return nil, err
+	}
+	if se == nil || !se.BelongsTo(scope, groupID, userID) {
+		return nil, ErrNotOwned
+	}
+	return se, nil
+}
+
+func (s *Store) DeleteScoped(id int64, scope string, groupID, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`DELETE FROM sessions WHERE id=? AND scope=? AND group_id=? AND user_id=?`, id, scope, groupID, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrNotOwned
+	}
+	return nil
+}
+
+// CommitContext 一条 SQL 同时提交摘要与窗口，拒绝覆盖生成摘要期间的新消息。
+func (s *Store) CommitContext(snapshot *Session, summary string, msgs []Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if msgs == nil {
+		msgs = []Message{}
+	}
+	raw, err := json.Marshal(msgs)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	res, err := s.db.Exec(`UPDATE sessions SET summary=?, messages=?, updated_at=?, revision=revision+1 WHERE id=? AND revision=?`, summary, string(raw), now, snapshot.ID, snapshot.Revision)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrConflict
+	}
+	snapshot.Summary, snapshot.Messages, snapshot.UpdatedAt = summary, append([]Message{}, msgs...), now
+	snapshot.Revision++
+	return nil
+}
+
+func (s *Store) Clear(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE sessions SET summary='', messages='[]', updated_at=?, revision=revision+1 WHERE id=?`, time.Now().Unix(), id)
 	return err
 }

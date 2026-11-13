@@ -60,7 +60,7 @@ func segmentsText(segs []core.Segment) string {
 	return b.String()
 }
 
-// fetchQuote 拉取被引用消息, 返回展示文本和图片 data URI(配置识图模型时下载引用中的图片)
+// fetchQuote 拉取被引用消息，返回展示文本和图片 data URI，供当前模型直接识图。
 func (s *Service) fetchQuote(replyID int64) (string, []string) {
 	info, err := s.bot.GetMessage(replyID)
 	if err != nil {
@@ -75,24 +75,7 @@ func (s *Service) fetchQuote(replyID int64) (string, []string) {
 	if name == "" {
 		name = int64ToStr(info.UserID)
 	}
-	// 引用消息含图片时一并下载, 交给识图模型转述
-	var imgs []string
-	if s.cfg.Memory.VisionModel != "" {
-		for _, seg := range info.Message {
-			if seg.Type != "image" {
-				continue
-			}
-			u, _ := seg.Data["url"].(string)
-			if u == "" {
-				continue
-			}
-			if du, err := downloadImageAsDataURI(u); err == nil {
-				imgs = append(imgs, du)
-			} else {
-				log.Printf("[ai] 引用图片下载失败: %v", err)
-			}
-		}
-	}
+	imgs := extractImageDataURLs(&core.Event{Message: info.Message})
 	return fmt.Sprintf("[引用消息] %s(%d): %s", name, info.UserID, text), imgs
 }
 

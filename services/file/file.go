@@ -30,16 +30,16 @@ type FileItem struct {
 }
 
 type Manager struct {
-	dir            string
-	bot            *core.Bot
-	files          core.FileClient
-	perm           *perm.Store
-	retentionDays  int
-	mu             sync.Mutex
-	index          []FileItem
-	http           *http.Client
-	cleanupTicker  *time.Ticker
-	stopCh         chan struct{}
+	dir           string
+	bot           *core.Bot
+	files         core.FileClient
+	perm          *perm.Store
+	retentionDays int
+	mu            sync.Mutex
+	index         []FileItem
+	http          *http.Client
+	cleanupTicker *time.Ticker
+	stopCh        chan struct{}
 }
 
 func New(dir string, bot *core.Bot, fc core.FileClient, permStore *perm.Store, retentionDays int) *Manager {
@@ -152,7 +152,7 @@ func (m *Manager) Handle(ctx context.Context, bot *core.Bot, ev *core.Event) boo
 	cmd, arg := cmdOfFile(t)
 	switch cmd {
 	case "/files", "/文件列表":
-		bot.Reply(ev, m.renderList())
+		bot.Reply(ev, m.renderList(ev))
 		return true
 	case "/cleanfiles", "/清理文件":
 		m.Cleanup()
@@ -254,7 +254,7 @@ func (m *Manager) handleSendFile(bot *core.Bot, ev *core.Event, arg string) bool
 		bot.Reply(ev, "用法: /sendfile <已保存文件名>")
 		return true
 	}
-	path, err := m.ResolvePath(ref)
+	path, err := m.resolveFor(core.WithEvent(context.Background(), ev), ref)
 	if err != nil {
 		bot.Reply(ev, err.Error())
 		return true
@@ -276,8 +276,8 @@ func (m *Manager) handleSendFile(bot *core.Bot, ev *core.Event, arg string) bool
 	return true
 }
 
-func (m *Manager) renderList() string {
-	list := m.List()
+func (m *Manager) renderList(ev *core.Event) string {
+	list := m.listFor(ev)
 	var b strings.Builder
 	b.WriteString("📁 已保存文件")
 	if m.retentionDays > 0 {
@@ -341,6 +341,11 @@ func (m *Manager) saveFromURL(rawURL, hintName, source string) (string, error) {
 	if name == "" {
 		name = filenameFromURL(rawURL)
 	}
+	return m.saveData(data, name, source)
+}
+
+// saveData 所有接收和生成的文件共用范围目录及排他创建逻辑。
+func (m *Manager) saveData(data []byte, name, source string) (string, error) {
 	if name == "" {
 		name = "file_" + time.Now().Format("20060102_150405")
 	}
@@ -348,9 +353,52 @@ func (m *Manager) saveFromURL(rawURL, hintName, source string) (string, error) {
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
 
-	path := filepath.Join(m.dir, name)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if name == "." || name == ".." {
+		return "", fmt.Errorf("无效文件名")
+	}
+	baseRoot, err := os.OpenRoot(m.dir)
+	if err != nil {
 		return "", err
+	}
+	defer baseRoot.Close()
+	root := baseRoot
+	dir := m.dir
+	if validSource(source) {
+		if err = baseRoot.Mkdir(source, 0o755); err != nil && !os.IsExist(err) {
+			return "", err
+		}
+		info, err := baseRoot.Lstat(source)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("会话文件目录不能为符号链接")
+		}
+		root, err = baseRoot.OpenRoot(source)
+		if err != nil {
+			return "", err
+		}
+		defer root.Close()
+		dir = filepath.Join(m.dir, source)
+	}
+	path := filepath.Join(dir, name)
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if os.IsExist(err) {
+		ext := filepath.Ext(name)
+		name = strings.TrimSuffix(name, ext) + fmt.Sprintf("_%d", time.Now().UnixNano()) + ext
+		path = filepath.Join(dir, name)
+		f, err = root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	}
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 
 	m.mu.Lock()
@@ -385,21 +433,20 @@ func (m *Manager) SaveFileFromCache(fileID, source string) (string, error) {
 	// get_file 可能返回本地路径
 	path, _ := info["file"].(string)
 	if path != "" && fileExists(path) {
-		// 复制到本地目录
-		name := filepath.Base(path)
-		dest := filepath.Join(m.dir, name)
-		data, err := os.ReadFile(path)
+		f, err := os.Open(path)
 		if err != nil {
 			return "", err
 		}
-		if err := os.WriteFile(dest, data, 0o644); err != nil {
+		defer f.Close()
+		const maxFileBytes = 100 << 20
+		data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
+		if err != nil {
 			return "", err
 		}
-		m.mu.Lock()
-		m.index = append(m.index, FileItem{Name: name, Path: dest, Size: int64(len(data)), Source: source, CreatedAt: time.Now().Unix()})
-		m.mu.Unlock()
-		m.saveIndex()
-		return name, nil
+		if len(data) > maxFileBytes {
+			return "", fmt.Errorf("文件超过大小上限(%dMB)", maxFileBytes>>20)
+		}
+		return m.saveData(data, filepath.Base(path), source)
 	}
 	// 否则尝试 URL
 	urlStr, _ := info["url"].(string)
@@ -457,23 +504,32 @@ func (m *Manager) loadIndex() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.index = nil
-	entries, err := os.ReadDir(m.dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
+	_ = filepath.WalkDir(m.dir, func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if e.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		if e.IsDir() {
-			continue
+			return nil
 		}
 		info, err := e.Info()
 		if err != nil {
-			continue
+			return nil
 		}
-		m.index = append(m.index, FileItem{
-			Name: e.Name(), Path: filepath.Join(m.dir, e.Name()),
-			Size: info.Size(), CreatedAt: info.ModTime().Unix(),
-		})
-	}
+		rel, err := filepath.Rel(m.dir, path)
+		if err != nil {
+			return nil
+		}
+		source := ""
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) > 1 && validSource(parts[0]) {
+			source = parts[0]
+		}
+		m.index = append(m.index, FileItem{Name: e.Name(), Path: path, Source: source, Size: info.Size(), CreatedAt: info.ModTime().Unix()})
+		return nil
+	})
 }
 
 func (m *Manager) saveIndex() {
@@ -492,7 +548,7 @@ func (m *Manager) Tools() []ai.Tool {
 			},
 			Risk: ai.RiskLow,
 			Callback: func(ctx context.Context, args map[string]interface{}) (string, error) {
-				list := m.List()
+				list := m.listFor(core.EventFrom(ctx))
 				if len(list) == 0 {
 					return "暂无已保存的文件", nil
 				}
@@ -517,7 +573,7 @@ func (m *Manager) Tools() []ai.Tool {
 			Callback: func(ctx context.Context, args map[string]interface{}) (string, error) {
 				gid := int64(args["group_id"].(float64))
 				name := args["name"].(string)
-				path, err := m.ResolvePath(name)
+				path, err := m.resolveFor(ctx, name)
 				if err != nil {
 					return err.Error(), nil
 				}
@@ -543,7 +599,7 @@ func (m *Manager) Tools() []ai.Tool {
 					return "无法获取当前会话", nil
 				}
 				name := args["name"].(string)
-				path, err := m.ResolvePath(name)
+				path, err := m.resolveFor(ctx, name)
 				if err != nil {
 					return err.Error(), nil
 				}
@@ -579,17 +635,17 @@ func (m *Manager) Tools() []ai.Tool {
 				return fmt.Sprintf("%v", info), nil
 			},
 		},
-		readFileTool(),
-		writeFileTool(),
-		listDirTool(),
+		m.readFileTool(),
+		m.writeFileTool(),
+		m.listDirTool(),
 	}
 }
 
 // readFileTool 读取服务器本地文件
-func readFileTool() ai.Tool {
-	t := ai.NewTool("read_file", "读取服务器上的文本文件内容。可用于查看配置文件、日志、代码等。",
+func (m *Manager) readFileTool() ai.Tool {
+	t := ai.NewTool("read_file", "读取当前会话保存的文本文件。主人还可读取服务器文件。",
 		map[string]*ai.ToolParam{
-			"path":    {Type: "string", Description: "文件绝对路径"},
+			"path":    {Type: "string", Description: "文件名或路径；普通用户仅限当前会话文件目录"},
 			"max_len": {Type: "integer", Description: "最大读取字符数(可选, 默认4000)"},
 		},
 		[]string{"path"},
@@ -602,10 +658,12 @@ func readFileTool() ai.Tool {
 			if v, ok := args["max_len"].(float64); ok && v > 0 {
 				maxLen = int(v)
 			}
-			if !fileExists(path) {
-				return "文件不存在: " + path, nil
+			f, err := m.openFile(ctx, path)
+			if err != nil {
+				return "", err
 			}
-			data, err := os.ReadFile(path)
+			defer f.Close()
+			data, err := io.ReadAll(io.LimitReader(f, 4<<20))
 			if err != nil {
 				return "读取失败: " + err.Error(), nil
 			}
@@ -620,7 +678,7 @@ func readFileTool() ai.Tool {
 }
 
 // writeFileTool 写入/修改服务器文件
-func writeFileTool() ai.Tool {
+func (m *Manager) writeFileTool() ai.Tool {
 	t := ai.NewTool("write_file", "向服务器文件写入内容。若文件不存在则创建, 存在则覆盖。可用于修改配置、创建文件等。",
 		map[string]*ai.ToolParam{
 			"path":    {Type: "string", Description: "文件绝对路径"},
@@ -628,6 +686,9 @@ func writeFileTool() ai.Tool {
 		},
 		[]string{"path", "content"},
 		func(ctx context.Context, args map[string]interface{}) (string, error) {
+			if !m.isOwner(core.EventFrom(ctx)) {
+				return "", fmt.Errorf("服务器文件写入仅限主人")
+			}
 			path, _ := args["path"].(string)
 			content, _ := args["content"].(string)
 			if path == "" {
@@ -646,22 +707,30 @@ func writeFileTool() ai.Tool {
 			return fmt.Sprintf("✅ 已写入 %s (%d 字符)", path, sz), nil
 		})
 	t.Risk = ai.RiskCritical
+	t.Authorize = func(ctx context.Context, _ map[string]interface{}) error {
+		if !m.isOwner(core.EventFrom(ctx)) {
+			return fmt.Errorf("服务器文件写入仅限主人")
+		}
+		return nil
+	}
 	return t
 }
 
 // listDirTool 列出目录内容
-func listDirTool() ai.Tool {
-	t := ai.NewTool("list_directory", "列出服务器指定目录下的文件和子目录。",
+func (m *Manager) listDirTool() ai.Tool {
+	t := ai.NewTool("list_directory", "列出当前会话目录的文件和子目录，主人可指定服务器目录。",
 		map[string]*ai.ToolParam{
-			"path": {Type: "string", Description: "目录路径(可选, 默认 /root)"},
+			"path": {Type: "string", Description: "目录路径(可选, 默认当前会话文件目录，主人默认文件缓存目录)"},
 		},
 		nil,
 		func(ctx context.Context, args map[string]interface{}) (string, error) {
 			path, _ := args["path"].(string)
-			if path == "" {
-				path = "/root"
+			f, err := m.openFile(ctx, path)
+			if err != nil {
+				return "", err
 			}
-			entries, err := os.ReadDir(path)
+			defer f.Close()
+			entries, err := f.ReadDir(-1)
 			if err != nil {
 				return "读取目录失败: " + err.Error(), nil
 			}

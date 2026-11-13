@@ -24,6 +24,11 @@ type fakeSender struct {
 	roles     map[int64]string // userID -> 群内角色
 }
 
+func (f *fakeSender) SendMessageWithReceipt(ctx context.Context, gid, uid int64, segs []core.Segment) (int64, error) {
+	err := f.SendGroupMsg(gid, uid, segs)
+	return int64(len(f.sent)), err
+}
+
 func (f *fakeSender) SendGroupMsg(gid, uid int64, msg []core.Segment) error {
 	for _, seg := range msg {
 		if t, ok := seg.Data["text"].(string); ok {
@@ -42,14 +47,14 @@ func (f *fakeSender) GetStrangerInfo(userID int64) (map[string]interface{}, erro
 	return map[string]interface{}{"nickname": f.strangers[userID]}, nil
 }
 
-func (f *fakeSender) SetGroupBan(groupID, userID int64, duration int) error    { return nil }
-func (f *fakeSender) SetGroupWholeBan(groupID int64, enable bool) error        { return nil }
-func (f *fakeSender) SetGroupKick(groupID, userID int64, reject bool) error    { return nil }
-func (f *fakeSender) SetGroupAdmin(groupID, userID int64, enable bool) error   { return nil }
-func (f *fakeSender) SetGroupCard(groupID, userID int64, card string) error    { return nil }
-func (f *fakeSender) SetGroupName(groupID int64, name string) error            { return nil }
-func (f *fakeSender) SetGroupLeave(groupID int64, isDismiss bool) error        { return nil }
-func (f *fakeSender) SendGroupNotice(groupID int64, content string) error      { return nil }
+func (f *fakeSender) SetGroupBan(groupID, userID int64, duration int) error  { return nil }
+func (f *fakeSender) SetGroupWholeBan(groupID int64, enable bool) error      { return nil }
+func (f *fakeSender) SetGroupKick(groupID, userID int64, reject bool) error  { return nil }
+func (f *fakeSender) SetGroupAdmin(groupID, userID int64, enable bool) error { return nil }
+func (f *fakeSender) SetGroupCard(groupID, userID int64, card string) error  { return nil }
+func (f *fakeSender) SetGroupName(groupID int64, name string) error          { return nil }
+func (f *fakeSender) SetGroupLeave(groupID int64, isDismiss bool) error      { return nil }
+func (f *fakeSender) SendGroupNotice(groupID int64, content string) error    { return nil }
 func (f *fakeSender) GetGroupMemberList(groupID int64) ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -73,6 +78,7 @@ func newTestManager(t *testing.T) (*Manager, *core.Bot, *fakeSender) {
 		t.Fatal(err)
 	}
 	pst.SetGroupBot(123, true) // 群默认关闭, 先启用
+	t.Cleanup(func() { pst.Close(); bot.Shutdown() })
 	return New(bot, pst), bot, fs
 }
 
@@ -101,10 +107,30 @@ func TestRequestCard(t *testing.T) {
 		t.Fatalf("应发出 1 条卡片, 实际 %d", len(fs.sent))
 	}
 	card := fs.sent[0]
-	for _, want := range []string{"#1", "456", "小明", "flag-abc", "问题: 喜欢猫吗", "答案: 喜欢"} {
+	for _, want := range []string{"入群申请", "456", "小明", "引用本条消息", "问题: 喜欢猫吗", "答案: 喜欢"} {
 		if !strings.Contains(card, want) {
 			t.Errorf("卡片缺少 %q:\n%s", want, card)
 		}
+	}
+}
+
+func TestGroupRequestQuoteSelectsActualCard(t *testing.T) {
+	m, bot, fs := newTestManager(t)
+	m.Handle(context.Background(), bot, requestEvent())
+	m.Handle(context.Background(), bot, msgEvent(999, "/入群申请"))
+	unknown := msgEvent(999, "同意")
+	unknown.Message = append([]core.Segment{{Type: "reply", Data: map[string]interface{}{"id": int64(99999)}}}, unknown.Message...)
+	if m.Handle(context.Background(), bot, unknown) || len(fs.approves) > 0 {
+		t.Fatal("unrelated quote approved")
+	}
+	ev := msgEvent(999, "同意")
+	ev.Message = append([]core.Segment{{Type: "reply", Data: map[string]interface{}{"id": int64(1)}}}, ev.Message...)
+	if !m.Handle(context.Background(), bot, ev) || len(fs.approves) != 1 || !fs.approves[0].approve {
+		t.Fatal("quoted request not approved")
+	}
+	m.Handle(context.Background(), bot, ev)
+	if len(fs.approves) != 1 {
+		t.Fatal("quoted request replayed")
 	}
 }
 
@@ -137,7 +163,7 @@ func TestMasterApprove(t *testing.T) {
 		t.Errorf("审批参数错误: %+v", c)
 	}
 	last := fs.sent[len(fs.sent)-1]
-	if len(fs.sent) != sentBefore+1 || !strings.Contains(last, "已同意 #1") || !strings.Contains(last, "小明 456") {
+	if len(fs.sent) != sentBefore+1 || !strings.Contains(last, "已同意") || !strings.Contains(last, "小明 456") {
 		t.Errorf("审批回复不对: %q", last)
 	}
 	// pending 已移除, 再审批同编号应提示未找到
@@ -159,7 +185,7 @@ func TestOwnerRejectWithReason(t *testing.T) {
 	if c.approve || c.reason != "广告号" {
 		t.Errorf("拒绝参数错误: %+v", c)
 	}
-	if !strings.Contains(fs.sent[len(fs.sent)-1], "已拒绝 #1") {
+	if !strings.Contains(fs.sent[len(fs.sent)-1], "已拒绝") {
 		t.Errorf("拒绝回复不对: %q", fs.sent[len(fs.sent)-1])
 	}
 }
@@ -181,7 +207,7 @@ func TestMemberRejectSilent(t *testing.T) {
 	}
 	// 申请仍在 pending
 	m.Handle(context.Background(), bot, msgEvent(555, "/入群申请"))
-	if !strings.Contains(fs.sent[len(fs.sent)-1], "#1 小明 (456)") {
+	if !strings.Contains(fs.sent[len(fs.sent)-1], "QQ: 456  昵称: 小明") {
 		t.Errorf("申请应仍在列表: %q", fs.sent[len(fs.sent)-1])
 	}
 }
@@ -197,7 +223,7 @@ func TestListRequests(t *testing.T) {
 	m.Handle(context.Background(), bot, requestEvent())
 	m.Handle(context.Background(), bot, msgEvent(555, "/requests"))
 	last := fs.sent[len(fs.sent)-1]
-	if !strings.Contains(last, "#1 小明 (456)") {
+	if !strings.Contains(last, "QQ: 456  昵称: 小明") {
 		t.Errorf("列表缺少申请: %q", last)
 	}
 }
@@ -206,6 +232,7 @@ func TestListRequests(t *testing.T) {
 func TestDisabledGroupSilent(t *testing.T) {
 	m, bot, fs := newTestManager(t)
 	pst, _ := perm.New(t.TempDir())
+	t.Cleanup(func() { pst.Close() })
 	pst.SetGroupBot(123, false)
 	m.perm = pst
 	if !m.Handle(context.Background(), bot, requestEvent()) {

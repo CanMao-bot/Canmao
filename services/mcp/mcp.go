@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -110,6 +111,9 @@ func (s *Server) toolToAI(t mcp.Tool) ai.Tool {
 		})
 	// MCP 工具涉及外部系统操作, 默认高风险(需主人/管理员确认)
 	tool.Risk = ai.RiskHigh
+	if raw, err := json.Marshal(t.InputSchema); err == nil {
+		tool.Function.Parameters.Raw = raw
+	}
 	return tool
 }
 

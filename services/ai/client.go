@@ -4,19 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"gobot/core"
 )
 
 type ToolParam struct {
-	Type        string                `json:"type"`
-	Description string                `json:"description,omitempty"`
-	Enum        []string              `json:"enum,omitempty"`
+	Type        string                 `json:"type"`
+	Description string                 `json:"description,omitempty"`
+	Enum        []string               `json:"enum,omitempty"`
 	Items       map[string]interface{} `json:"items,omitempty"`
 }
 
@@ -24,13 +27,24 @@ type ToolParameters struct {
 	Type       string                `json:"type"`
 	Properties map[string]*ToolParam `json:"properties,omitempty"`
 	Required   []string              `json:"required,omitempty"`
+	Raw        json.RawMessage       `json:"-"` // MCP 等外部工具保留完整 Schema。
+}
+
+func (p ToolParameters) MarshalJSON() ([]byte, error) {
+	if len(p.Raw) > 0 {
+		return p.Raw, nil
+	}
+	type plain ToolParameters
+	return json.Marshal(plain(p))
 }
 
 type Tool struct {
-	Type     string        `json:"type"`
-	Function ToolFunction  `json:"function"`
-	Risk     RiskLevel     `json:"-"`
-	Callback func(ctx context.Context, args map[string]interface{}) (string, error) `json:"-"`
+	Type      string                                                                 `json:"type"`
+	Function  ToolFunction                                                           `json:"function"`
+	Risk      RiskLevel                                                              `json:"-"`
+	Authorize func(context.Context, map[string]interface{}) error                    `json:"-"`
+	Timeout   time.Duration                                                          `json:"-"`
+	Callback  func(ctx context.Context, args map[string]interface{}) (string, error) `json:"-"`
 }
 
 type ToolFunction struct {
@@ -59,17 +73,17 @@ func NewTool(name, desc string, params map[string]*ToolParam, required []string,
 }
 
 type Message struct {
-	Role       string        `json:"role"`
-	Content    interface{}   `json:"content,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 }
 
 // ContentPart 多模态消息内容片段
 type ContentPart struct {
-	Type     string         `json:"type"` // text / image_url
-	Text     string         `json:"text,omitempty"`
-	ImageURL *ImageURLPart  `json:"image_url,omitempty"`
+	Type     string        `json:"type"` // text / image_url
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ImageURLPart `json:"image_url,omitempty"`
 }
 
 type ImageURLPart struct {
@@ -103,6 +117,17 @@ func (m Message) TextContent() string {
 		for _, p := range c {
 			if p.Type == "text" {
 				b.WriteString(p.Text)
+			}
+		}
+		return b.String()
+	case []interface{}:
+		// interface{} content decoded from a compatible API becomes JSON objects.
+		var b strings.Builder
+		for _, part := range c {
+			if p, ok := part.(map[string]interface{}); ok && p["type"] == "text" {
+				if text, ok := p["text"].(string); ok {
+					b.WriteString(text)
+				}
 			}
 		}
 		return b.String()
@@ -162,6 +187,20 @@ func (c *Client) endpoint() (string, string, string, string) {
 
 type ctxModelKey struct{}
 
+type requestEndpoint struct {
+	BaseURL, APIKey, Model, Proxy string
+	Window                        int
+}
+type endpointKey struct{}
+
+func (c *Client) pin(ctx context.Context, window int) context.Context {
+	base, key, model, proxy := c.endpoint()
+	if over := modelFromCtx(ctx); over != "" {
+		model = over
+	}
+	return context.WithValue(ctx, endpointKey{}, requestEndpoint{base, key, model, proxy, window})
+}
+
 // WithModelOverride 在 context 中指定本次请求使用的模型(按用户组)
 func WithModelOverride(ctx context.Context, model string) context.Context {
 	return context.WithValue(ctx, ctxModelKey{}, model)
@@ -176,7 +215,16 @@ func modelFromCtx(ctx context.Context) string {
 
 // Complete 返回模型完整回复消息(可能含 ToolCalls)
 func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
+	// Retries share the original request deadline instead of doubling the timeout.
+	if c.cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(c.cfg.Timeout)*time.Second)
+		defer cancel()
+	}
 	baseURL, apiKey, model, proxy := c.endpoint()
+	if endpoint, ok := ctx.Value(endpointKey{}).(requestEndpoint); ok {
+		baseURL, apiKey, model, proxy = endpoint.BaseURL, endpoint.APIKey, endpoint.Model, endpoint.Proxy
+	}
 	if m := modelFromCtx(ctx); m != "" {
 		model = m
 	}
@@ -201,26 +249,13 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool)
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-
 	client := c.http
 	if proxy != "" {
 		client = httpClientFor(proxy, time.Duration(c.cfg.Timeout)*time.Second)
 	}
-	resp, err := client.Do(httpReq)
+	respBody, err := requestModel(ctx, client, baseURL+"/chat/completions", apiKey, body)
 	if err != nil {
-		return nil, fmt.Errorf("调用 LLM API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM API 返回 %d: %s", resp.StatusCode, string(respBody))
+		return nil, err
 	}
 
 	var result struct {
@@ -235,5 +270,58 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool)
 		return nil, fmt.Errorf("LLM 无响应")
 	}
 	msg := result.Choices[0].Message
+	// Normalize final text at the model boundary so replies, history, and proactive
+	// messages share the same behavior. Tool names and arguments remain untouched.
+	text := cleanAssistantOutput(msg.TextContent())
+	msg.Content = text
+	if len(msg.ToolCalls) == 0 && text == "" {
+		return nil, fmt.Errorf("模型未返回可显示的正文")
+	}
 	return &msg, nil
+}
+
+// Only incomplete transport responses are retried. No tools have executed at this
+// boundary; HTTP rejections, invalid model output and cancellation are not retried.
+func requestModel(ctx context.Context, client *http.Client, endpoint, apiKey string, body []byte) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		data, err := requestModelOnce(ctx, client, endpoint, apiKey, body)
+		interrupted := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err == nil || attempt == 1 || !interrupted {
+			return data, err
+		}
+		log.Printf("[ai] model_retry attempt=2 reason=connection_interrupted")
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("LLM 请求未完成")
+}
+
+func requestModelOnce(ctx context.Context, client *http.Client, endpoint, apiKey string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 LLM API: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("LLM API 返回 %d: %s", resp.StatusCode, string(data))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取 LLM 响应: %w", err)
+	}
+	return data, nil
 }

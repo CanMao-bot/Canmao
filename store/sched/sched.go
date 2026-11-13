@@ -15,9 +15,9 @@ import (
 // Task 定时任务
 type Task struct {
 	ID        int64  `json:"id"`
-	Type      string `json:"type"`      // once=一次性 / repeat=重复
-	Content   string `json:"content"`   // 要发送的内容
-	Scope     string `json:"scope"`     // group / private
+	Type      string `json:"type"`    // once=一次性 / repeat=重复
+	Content   string `json:"content"` // 要发送的内容
+	Scope     string `json:"scope"`   // group / private
 	GroupID   int64  `json:"group_id"`
 	UserID    int64  `json:"user_id"`
 	TargetAt  int64  `json:"target_at"` // 首次触发时间(unix)
@@ -134,6 +134,23 @@ func (s *Store) Disable(id int64) error {
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`UPDATE tasks SET enabled=0 WHERE id=?`, id)
 	return err
+}
+
+func (s *Store) DisableScoped(id int64, scope string, groupID, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE tasks SET enabled=0 WHERE id=? AND scope=? AND group_id=? AND user_id=?`, id, scope, groupID, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("任务不存在或不属于当前会话")
+	}
+	return nil
 }
 
 // Delete 删除任务

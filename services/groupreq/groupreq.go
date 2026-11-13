@@ -1,5 +1,5 @@
 // Package groupreq 入群申请管理: bot 是群管理时把入群申请发卡到群里,
-// 群主/管理员/主人用 /同意 N /拒绝 N [理由] 审批。
+// 群主/管理员/主人引用申请卡片回复同意或拒绝。
 package groupreq
 
 import (
@@ -17,12 +17,14 @@ import (
 
 // Request 一条待审批的入群申请
 type Request struct {
-	ID       int       // 群内递增短编号
-	UserID   int64     // 申请者 QQ
-	Nickname string    // 申请者昵称
-	Comment  string    // 验证信息/入群理由(可能含问题答案)
-	Flag     string    // 审批标识(set_group_add_request 用)
-	Time     time.Time // 收到时间
+	ID               int       // 群内递增短编号
+	UserID           int64     // 申请者 QQ
+	Nickname         string    // 申请者昵称
+	Comment          string    // 验证信息/入群理由(可能含问题答案)
+	Flag             string    // 审批标识(set_group_add_request 用)
+	Time             time.Time // 收到时间
+	MessageID        int64     // actual bot request card, never a user-supplied identifier
+	PreviousMessages []int64
 }
 
 // adminCacheEntry bot 群管理身份缓存
@@ -32,8 +34,8 @@ type adminCacheEntry struct {
 }
 
 const (
-	pendingTTL    = 24 * time.Hour    // 待审批申请保留时长
-	adminCacheTTL = 10 * time.Minute  // bot 管理身份缓存时长
+	pendingTTL    = 24 * time.Hour   // 待审批申请保留时长
+	adminCacheTTL = 10 * time.Minute // bot 管理身份缓存时长
 )
 
 type Manager struct {
@@ -107,7 +109,11 @@ func (m *Manager) handleRequest(bot *core.Bot, ev *core.Event) bool {
 
 	// 群内发申请卡片
 	card := m.renderCard(req)
-	if err := bot.Sender.SendGroupMsg(ev.GroupID, 0, []core.Segment{core.TextSegment(card)}); err != nil {
+	m.mu.Lock()
+	messageID, err := bot.SendTracked(context.Background(), &core.Event{DetailType: "group", GroupID: ev.GroupID}, card)
+	req.MessageID = messageID
+	m.mu.Unlock()
+	if err != nil {
 		log.Printf("[groupreq] 发送申请卡片失败: %v", err)
 	}
 	return true
@@ -121,11 +127,37 @@ func (m *Manager) handleCommand(bot *core.Bot, ev *core.Event) bool {
 	}
 	switch fields[0] {
 	case "/入群申请", "/requests":
-		bot.Reply(ev, m.renderList(ev.GroupID))
+		m.mu.Lock()
+		m.cleanupLocked(ev.GroupID)
+		if len(m.pending[ev.GroupID]) == 0 {
+			m.mu.Unlock()
+			bot.Reply(ev, "暂无待审批申请")
+			return true
+		}
+		for _, req := range m.pending[ev.GroupID] {
+			id, err := bot.SendTracked(context.Background(), ev, m.renderCard(req))
+			if err == nil {
+				if req.MessageID != 0 {
+					req.PreviousMessages = append(req.PreviousMessages, req.MessageID)
+				}
+				req.MessageID = id
+			}
+		}
+		m.mu.Unlock()
 		return true
-	case "/同意", "/approve":
+	case "同意", "/同意", "/approve":
+		if ev.ReplyID() == 0 {
+			if fields[0] == "同意" {
+				return false
+			}
+		}
 		return m.handleApprove(bot, ev, fields, true)
-	case "/拒绝", "/reject":
+	case "拒绝", "/拒绝", "/reject":
+		if ev.ReplyID() == 0 {
+			if fields[0] == "拒绝" {
+				return false
+			}
+		}
 		return m.handleApprove(bot, ev, fields, false)
 	}
 	return false
@@ -133,16 +165,39 @@ func (m *Manager) handleCommand(bot *core.Bot, ev *core.Event) bool {
 
 // handleApprove 同意/拒绝审批
 func (m *Manager) handleApprove(bot *core.Bot, ev *core.Event, fields []string, approve bool) bool {
-	// 仅主人/群主/管理员可用, 无权限静默
-	if !m.canApprove(bot, ev) {
+	if ev.ReplyID() != 0 {
+		m.mu.Lock()
+		m.cleanupLocked(ev.GroupID)
+		var targetID int
+		for _, req := range m.pending[ev.GroupID] {
+			matches := req.MessageID == ev.ReplyID()
+			for _, id := range req.PreviousMessages {
+				if id == ev.ReplyID() {
+					matches = true
+					break
+				}
+			}
+			if matches {
+				targetID = req.ID
+				break
+			}
+		}
+		m.mu.Unlock()
+		if targetID == 0 {
+			return false
+		}
+		reason := strings.Join(fields[1:], " ")
+		fields = []string{fields[0], strconv.Itoa(targetID)}
+		if reason != "" {
+			fields = append(fields, reason)
+		}
+	} else if len(fields) < 2 {
+		bot.Reply(ev, "请引用入群申请卡片回复「同意」或「拒绝 [理由]」")
 		return true
 	}
-	if len(fields) < 2 {
-		usage := "用法: " + fields[0] + " <编号>"
-		if !approve {
-			usage += " [理由]"
-		}
-		bot.Reply(ev, usage)
+	// Authorize only after matching the quote so other approval workflows can
+	// handle their own messages, even when the speaker is not a QQ group admin.
+	if !m.canApprove(bot, ev) {
 		return true
 	}
 	id, err := strconv.Atoi(fields[1])
@@ -172,9 +227,9 @@ func (m *Manager) handleApprove(bot *core.Bot, ev *core.Event, fields []string, 
 	}
 	who := fmt.Sprintf("%s %d", req.Nickname, req.UserID)
 	if approve {
-		bot.Reply(ev, fmt.Sprintf("✅ 已同意 #%d (%s) 的入群申请", req.ID, who))
+		bot.Reply(ev, fmt.Sprintf("✅ 已同意 %s 的入群申请", who))
 	} else {
-		bot.Reply(ev, fmt.Sprintf("🚫 已拒绝 #%d (%s) 的入群申请", req.ID, who))
+		bot.Reply(ev, fmt.Sprintf("🚫 已拒绝 %s 的入群申请", who))
 	}
 	return true
 }
@@ -274,11 +329,10 @@ func (m *Manager) cleanupLocked(groupID int64) {
 // renderCard 渲染申请卡片
 func (m *Manager) renderCard(req *Request) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("📨 入群申请 #%d\n", req.ID))
+	b.WriteString("📨 入群申请\n")
 	b.WriteString(fmt.Sprintf("QQ: %d  昵称: %s\n", req.UserID, req.Nickname))
-	b.WriteString("flag: " + req.Flag + "\n")
 	b.WriteString(renderComment(req.Comment))
-	b.WriteString(fmt.Sprintf("\n群主/管理员/主人回复: /同意 %d 或 /拒绝 %d [理由]", req.ID, req.ID))
+	b.WriteString("\n群主/管理员/主人请引用本条消息回复「同意」或「拒绝 [理由]」")
 	return b.String()
 }
 
@@ -304,24 +358,4 @@ func renderComment(comment string) string {
 		return out
 	}
 	return "验证信息: " + comment
-}
-
-// renderList 渲染待审批列表
-func (m *Manager) renderList(groupID int64) string {
-	m.mu.Lock()
-	m.cleanupLocked(groupID)
-	list := make([]*Request, len(m.pending[groupID]))
-	copy(list, m.pending[groupID])
-	m.mu.Unlock()
-
-	if len(list) == 0 {
-		return "暂无待审批申请"
-	}
-	var b strings.Builder
-	b.WriteString("📨 待审批入群申请:\n")
-	for _, r := range list {
-		b.WriteString(fmt.Sprintf("#%d %s (%d)  %s\n", r.ID, r.Nickname, r.UserID, r.Time.Format("01-02 15:04")))
-	}
-	b.WriteString("回复 /同意 N 或 /拒绝 N [理由] 审批")
-	return b.String()
 }

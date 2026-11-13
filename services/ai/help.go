@@ -50,6 +50,9 @@ func (s *Service) renderHelp(lvl userLevel) string {
 	// 基础命令(所有人)
 	b.WriteString("\n📝 基础命令:\n")
 	b.WriteString("  /help 显示帮助\n")
+	if s.cfg != nil && core.FeatureOn(s.cfg.Community.Enabled) {
+		b.WriteString("  功能 / 娱乐功能 / 管理功能 查看社区菜单（无需AI）\n")
+	}
 	b.WriteString("  /ai status 查看本群 AI 状态\n")
 	b.WriteString("  /clear 清除当前会话上下文\n")
 	b.WriteString("  /compact 压缩当前会话(保留摘要)\n")
@@ -60,17 +63,22 @@ func (s *Service) renderHelp(lvl userLevel) string {
 	if lvl >= levelAdmin {
 		// 管理员命令
 		b.WriteString("\n⚙️ 管理员命令:\n")
-		b.WriteString("  /ai on 开启本群 AI\n")
-		b.WriteString("  /ai off 关闭本群 AI\n")
 		b.WriteString("  /bot on 开启本群 bot\n")
 		b.WriteString("  /bot off 关闭本群 bot(全体静默)\n")
 		b.WriteString("  /rename <标题> 重命名当前会话\n")
 		b.WriteString("  /delete <编号> 删除会话\n")
+		b.WriteString("  自然语言可请求 QQ 原生操作：消息、好友、群管、相册和空间等，按接口审批；账号及原生文件能力限主人。\n")
 	}
 
 	if lvl >= levelMaster {
 		// 主人专属
 		b.WriteString("\n👑 主人专属:\n")
+		b.WriteString("  群 AI（在目标群操作，与 bot/群娱开关独立）:\n")
+		b.WriteString("    /ai on | off 开启/关闭本群 AI\n")
+		b.WriteString("    /ai settings 查看本群独立设置\n")
+		b.WriteString("    /ai mention on|off 设置仅@触发\n")
+		b.WriteString("    /ai probability <0到1> 设置普通消息回复概率\n")
+		b.WriteString("    /ai reset 恢复全局触发配置\n")
 		b.WriteString("  模型提供商:\n")
 		b.WriteString("    /provider 查看提供商\n")
 		b.WriteString("    /provider add <名称> <BaseURL> <APIKey> 添加提供商\n")

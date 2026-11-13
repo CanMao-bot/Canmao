@@ -12,8 +12,8 @@ import (
 
 // Question 单个问题
 type Question struct {
-	ID          string `json:"id"`
-	Text        string `json:"text"`
+	ID          string   `json:"id"`
+	Text        string   `json:"text"`
 	Options     []string `json:"options,omitempty"`
 	Answer      string
 	MultiChoice bool
@@ -21,12 +21,12 @@ type Question struct {
 
 // AskRequest 一次提问会话
 type AskRequest struct {
-	key        string
-	Questions  []Question
-	UserID     int64
-	GroupID    int64
-	Channel    chan AskResult
-	ExpireAt   time.Time
+	key       string
+	Questions []Question
+	UserID    int64
+	GroupID   int64
+	Channel   chan AskResult
+	ExpireAt  time.Time
 }
 
 type AskResult struct {
@@ -75,11 +75,12 @@ func (a *Asker) Ask(ctx context.Context, ev *core.Event, questions []Question) (
 		Channel:   make(chan AskResult, 1),
 		ExpireAt:  time.Now().Add(a.timeout),
 	}
+	msg := a.renderQuestions(req)
 	a.pendings[key] = req
 	a.mu.Unlock()
+	defer a.removeRequest(req)
 
 	// 一次性输出所有问题
-	msg := a.renderQuestions(req)
 	if ev.IsGroup() {
 		a.bot.Sender.SendGroupMsg(ev.GroupID, 0, []core.Segment{core.TextSegment(msg)})
 	} else {
@@ -88,13 +89,10 @@ func (a *Asker) Ask(ctx context.Context, ev *core.Event, questions []Question) (
 
 	select {
 	case res := <-req.Channel:
-		a.remove(key)
 		return &res, nil
 	case <-time.After(a.timeout):
-		a.remove(key)
 		return &AskResult{Completed: false, Reason: "等待回答超时"}, nil
 	case <-ctx.Done():
-		a.remove(key)
 		return &AskResult{Completed: false, Reason: "请求被取消"}, nil
 	}
 }
@@ -103,13 +101,19 @@ func (a *Asker) Ask(ctx context.Context, ev *core.Event, questions []Question) (
 func (a *Asker) Resolve(ev *core.Event) bool {
 	key := askKey(ev)
 	a.mu.Lock()
+	var reply string
+	defer func() {
+		a.mu.Unlock()
+		if reply != "" {
+			a.bot.Reply(ev, reply)
+		}
+	}()
 	req, ok := a.pendings[key]
-	a.mu.Unlock()
 	if !ok {
 		return false
 	}
 	if time.Now().After(req.ExpireAt) {
-		a.remove(key)
+		delete(a.pendings, key)
 		return false
 	}
 
@@ -124,8 +128,8 @@ func (a *Asker) Resolve(ev *core.Event) bool {
 
 	// 若用户回答 "取消/算了" 则放弃
 	if isReject(text) {
-		a.remove(key)
-		a.bot.Reply(ev, "已取消提问")
+		delete(a.pendings, key)
+		reply = "已取消提问"
 		req.Channel <- AskResult{Completed: false, Reason: "用户取消"}
 		return true
 	}
@@ -139,7 +143,10 @@ func (a *Asker) Resolve(ev *core.Event) bool {
 	numbered := map[int]string{}
 	for _, line := range lines {
 		t := strings.TrimSpace(line)
-		for idx := range ids {
+		for idx, q := range req.Questions {
+			if q.Answer != "" {
+				continue
+			}
 			prefix := fmt.Sprintf("%d.", idx+1)
 			if strings.HasPrefix(t, prefix) {
 				numbered[idx] = strings.TrimSpace(strings.TrimPrefix(t, prefix))
@@ -148,9 +155,9 @@ func (a *Asker) Resolve(ev *core.Event) bool {
 	}
 
 	if len(numbered) > 0 {
-		for idx, id := range ids {
+		for idx, q := range req.Questions {
 			if ans, ok := numbered[idx]; ok {
-				a.assign(req, id, ans)
+				a.assign(req, q.ID, ans)
 			}
 		}
 	} else {
@@ -178,7 +185,7 @@ func (a *Asker) Resolve(ev *core.Event) bool {
 	}
 
 	// 还有未答的, 提示补齐
-	a.bot.Reply(ev, "还有问题未回答, 请补齐: "+strings.Join(remaining, ", "))
+	reply = "还有问题未回答, 请补齐: " + strings.Join(remaining, ", ")
 	return true
 }
 
@@ -206,14 +213,16 @@ func (a *Asker) finish(req *AskRequest) {
 	for _, q := range req.Questions {
 		answers[q.ID] = q.Answer
 	}
-	a.remove(req.key)
+	delete(a.pendings, req.key)
 	req.Channel <- AskResult{Answers: answers, Completed: true}
 }
 
-func (a *Asker) remove(key string) {
+func (a *Asker) removeRequest(req *AskRequest) {
 	a.mu.Lock()
-	delete(a.pendings, key)
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	if a.pendings[req.key] == req {
+		delete(a.pendings, req.key)
+	}
 }
 
 func (a *Asker) renderQuestions(req *AskRequest) string {

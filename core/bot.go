@@ -2,18 +2,46 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 type Sender interface {
 	SendGroupMsg(groupID, userID int64, msg []Segment) error
 	SendPrivateMsg(userID int64, msg []Segment) error
+}
+
+// ReceiptSender returns the real message ID for workflows resolved by quoting
+// a bot message. Implementations must not synthesize IDs or guess the recipient.
+type ReceiptSender interface {
+	SendMessageWithReceipt(ctx context.Context, groupID, userID int64, msg []Segment) (int64, error)
+}
+
+func (b *Bot) SendTracked(ctx context.Context, ev *Event, text string) (int64, error) {
+	sender, ok := b.Sender.(ReceiptSender)
+	if !ok {
+		return 0, errors.New("当前连接不支持消息回执，无法创建可引用的申请")
+	}
+	gid := int64(0)
+	if ev.IsGroup() {
+		gid = ev.GroupID
+	}
+	id, err := sender.SendMessageWithReceipt(ctx, gid, ev.UserID, []Segment{TextSegment(text)})
+	if err == nil && id == 0 {
+		return 0, errors.New("发送申请未取得有效消息回执")
+	}
+	return id, err
+}
+
+// QQAPIClient exposes native OneBot actions. Stream callbacks receive intermediate
+// data frames; the returned data is always the final API response.
+type QQAPIClient interface {
+	CallQQAPI(ctx context.Context, action string, params map[string]interface{}, onStream func(json.RawMessage) error) (json.RawMessage, error)
 }
 
 // FileClient 文件/图片交互能力(由 adapter 实现)
@@ -32,9 +60,15 @@ type ForwardSender interface {
 	SendForwardMsg(groupID, userID int64, nodes []ForwardNode) error
 }
 
+// ForwardReceiptSender supports cancellation and returns the actual message ID.
+type ForwardReceiptSender interface {
+	SendForwardWithReceipt(ctx context.Context, groupID, userID int64, nodes []ForwardNode) (int64, error)
+}
+
 // MessageInfo 消息详情(get_msg)
 type MessageInfo struct {
 	MessageID  int64
+	GroupID    int64
 	UserID     int64
 	Nickname   string
 	Time       int64
@@ -100,6 +134,15 @@ type Service interface {
 	Handle(ctx context.Context, bot *Bot, ev *Event) bool
 }
 
+// ControlService 只处理唤醒运行中任务的短消息，不占普通任务的执行名额。
+type ControlService interface {
+	HandleControl(ctx context.Context, bot *Bot, ev *Event) bool
+}
+
+// EventPolicy applies to all services, including the fast approval/ask control path.
+// Implementations must not perform network requests on this ingress path.
+type EventPolicy interface{ AllowEvent(ev *Event) bool }
+
 type Bot struct {
 	Cfg      *Config
 	Sender   Sender
@@ -109,19 +152,22 @@ type Bot struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	// dispatch 背压: 限制并发处理的事件数, 防止消息洪峰(刷屏/被拉群)无限起 goroutine 打爆 LLM API
-	dispatchSem chan struct{}
+	dispatchSem  chan struct{}
+	ingress      chan *Event
+	dispatchOnce sync.Once
+	stopped      bool
+	routers      sync.WaitGroup
+	workers      sync.WaitGroup
+	background   sync.WaitGroup
 }
 
 // maxDispatchConcurrency 全局并发事件处理上限。
 // 审批等待等长阻塞也会占用名额, 容量需留足余量(正常聊天很难同时有几十个在途事件)。
 const maxDispatchConcurrency = 64
 
-// dispatchDropWait 事件满载时的最长等待; 超时丢弃防止无界堆积
-const dispatchDropWait = 5 * time.Second
-
 func NewBot(cfg *Config) *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Bot{Cfg: cfg, ctx: ctx, cancel: cancel, dispatchSem: make(chan struct{}, maxDispatchConcurrency)}
+	return &Bot{Cfg: cfg, ctx: ctx, cancel: cancel, dispatchSem: make(chan struct{}, maxDispatchConcurrency), ingress: make(chan *Event, 1024)}
 }
 
 func (b *Bot) SetSender(s Sender) {
@@ -140,21 +186,110 @@ func (b *Bot) RegisterService(s Service) {
 
 func (b *Bot) Run() {}
 
-func (b *Bot) Shutdown() { b.cancel() }
+func (b *Bot) Shutdown() { b.mu.Lock(); b.stopped = true; b.cancel(); b.mu.Unlock() }
+
+// GoBackground registers a bounded service worker in the bot's shutdown lifecycle.
+// The caller owns queue/concurrency limits; no new worker starts after Shutdown.
+func (b *Bot) GoBackground(fn func(context.Context)) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped {
+		return false
+	}
+	b.background.Add(1)
+	go func() {
+		defer b.background.Done()
+		fn(b.ctx)
+	}()
+	return true
+}
+
+func (b *Bot) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { b.routers.Wait(); b.workers.Wait(); b.background.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (b *Bot) Dispatch(ev *Event) {
-	// 异步分发: Agent 等待用户审批时不能阻塞 WS 读取循环
-	// 背压: 先占全局并发名额, 满载短暂等待后丢弃(带日志), 避免 goroutine/API 无限膨胀
-	select {
-	case b.dispatchSem <- struct{}{}:
-	case <-time.After(dispatchDropWait):
-		log.Printf("[core] 事件处理满载(>=%d 并发), 丢弃消息 (id=%d, user=%d)", maxDispatchConcurrency, ev.MessageID, ev.UserID)
+	if ev == nil {
 		return
 	}
-	go func() {
-		defer func() { <-b.dispatchSem }()
-		b.dispatch(ev)
-	}()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.stopped {
+		return
+	}
+	b.dispatchOnce.Do(func() {
+		for i := 0; i < 4; i++ {
+			b.routers.Add(1)
+			go func() { defer b.routers.Done(); b.routeEvents() }()
+		}
+	})
+	// 接收路径绝不等待执行名额，也不做网络请求。
+	select {
+	case <-b.ctx.Done():
+	case b.ingress <- ev:
+	default:
+		log.Printf("[core] 接收队列已满，丢弃事件 id=%d", ev.MessageID)
+	}
+}
+
+func (b *Bot) serviceSnapshot() []Service {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return append([]Service(nil), b.services...)
+}
+
+func (b *Bot) routeEvents() {
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case ev := <-b.ingress:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[core] 控制消息处理异常: %v", r)
+					}
+				}()
+				ctx := WithEvent(b.ctx, ev)
+				if ctx.Err() != nil {
+					return
+				}
+				for _, svc := range b.serviceSnapshot() {
+					if policy, ok := svc.(EventPolicy); ok && !policy.AllowEvent(ev) {
+						return
+					}
+				}
+				for _, svc := range b.serviceSnapshot() {
+					if control, ok := svc.(ControlService); ok && control.HandleControl(ctx, b, ev) {
+						return
+					}
+				}
+				select {
+				case b.dispatchSem <- struct{}{}:
+					b.workers.Add(1)
+					go func() {
+						defer b.workers.Done()
+						defer func() {
+							<-b.dispatchSem
+							if r := recover(); r != nil {
+								log.Printf("[core] 事件处理异常: %v", r)
+							}
+						}()
+						b.dispatch(ev)
+					}()
+				default:
+					log.Printf("[core] 执行任务已满，丢弃普通事件 id=%d", ev.MessageID)
+				}
+			}()
+		}
+	}
 }
 
 func (b *Bot) dispatch(ev *Event) {

@@ -51,8 +51,8 @@ func (s *Store) init() error {
 		`CREATE TABLE IF NOT EXISTS groups (
 			group_id INTEGER PRIMARY KEY,
 			name TEXT DEFAULT '',
-			ai_enabled INTEGER DEFAULT 1,
-			bot_enabled INTEGER DEFAULT 1,
+			ai_enabled INTEGER DEFAULT 0,
+			bot_enabled INTEGER DEFAULT 0,
 			updated_at INTEGER DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS group_members (
@@ -61,6 +61,8 @@ func (s *Store) init() error {
 			role TEXT NOT NULL DEFAULT 'member',
 			PRIMARY KEY (group_id, user_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS group_ai_policy(group_id INTEGER PRIMARY KEY,enabled_by INTEGER NOT NULL DEFAULT 0,mention_only INTEGER,reply_probability REAL)`,
+		`CREATE TABLE IF NOT EXISTS group_ai_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,group_id INTEGER NOT NULL,actor_id INTEGER NOT NULL,detail TEXT NOT NULL,at INTEGER NOT NULL)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
@@ -115,28 +117,8 @@ func (s *Store) SetGroupRole(groupID, userID int64, role string) error {
 }
 
 func (s *Store) GroupEnabled(groupID int64) bool {
-	var v int
-	err := s.db.QueryRow(`SELECT ai_enabled FROM groups WHERE group_id=?`, groupID).Scan(&v)
-	if err == sql.ErrNoRows {
-		return false // 默认关闭 AI
-	}
-	if err != nil || v == 0 {
-		return false
-	}
-	return true
-}
-
-func (s *Store) SetGroupAI(groupID int64, on bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v := 0
-	if on {
-		v = 1
-	}
-	_, err := s.db.Exec(`INSERT INTO groups(group_id, ai_enabled, updated_at) VALUES(?,?,unixepoch())
-		ON CONFLICT(group_id) DO UPDATE SET ai_enabled=?, updated_at=unixepoch()`,
-		groupID, v, v)
-	return err
+	g, err := s.GroupAI(groupID)
+	return err == nil && g.Enabled
 }
 
 func (s *Store) SetGroupBot(groupID int64, on bool) error {
@@ -146,7 +128,7 @@ func (s *Store) SetGroupBot(groupID int64, on bool) error {
 	if on {
 		v = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO groups(group_id, bot_enabled, updated_at) VALUES(?,?,unixepoch())
+	_, err := s.db.Exec(`INSERT INTO groups(group_id, bot_enabled, ai_enabled, updated_at) VALUES(?,?,0,unixepoch())
 		ON CONFLICT(group_id) DO UPDATE SET bot_enabled=?, updated_at=unixepoch()`,
 		groupID, v, v)
 	return err
@@ -163,6 +145,9 @@ func (s *Store) BotEnabled(groupID int64) bool {
 
 // CanUseAI: 判断该用户在该群是否可用 AI
 func (s *Store) CanUseAI(groupID, userID int64, isMaster bool) (bool, error) {
+	if !s.BotEnabled(groupID) || !s.GroupEnabled(groupID) {
+		return false, nil
+	}
 	if isMaster {
 		return true, nil
 	}
@@ -171,9 +156,6 @@ func (s *Store) CanUseAI(groupID, userID int64, isMaster bool) (bool, error) {
 		return false, err
 	}
 	if role == RoleBanned {
-		return false, nil
-	}
-	if !s.GroupEnabled(groupID) {
 		return false, nil
 	}
 	return true, nil

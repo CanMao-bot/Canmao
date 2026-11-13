@@ -21,6 +21,7 @@ ai:
   base_url: "https://api.deepseek.com/v1"   # OpenAI 兼容接口
   api_key: "YOUR_API_KEY"  # 你的 API Key
   model: "deepseek-chat"
+  image_mode: native     # native=当前模型直接看原图；纯文本模型选 caption 并配置 memory.vision_model
   system_prompt: |
     你是一个运行在 QQ 群里的智能助手, 名字叫 罐头喵。
     回答要简洁、友好, 使用中文。
@@ -33,13 +34,13 @@ ai:
   max_tokens: 2048
   temperature: 0.7
   timeout: 120
-  default_on: false
-  max_history: 200        # 每个会话保留的历史消息数
+  default_on: false       # 兼容旧配置；群AI始终需主人在目标群 /ai on 显式授权
+  max_history: 200        # 历史消息超过此数量时归纳旧消息，保留摘要与近期消息
   session_mode: merged    # 群会话模式: merged=全群合并 / separate=按用户独立
-  mention_only: false
-  reply_probability: 0
-  context_window: 65536   # 模型上下文窗口(token), 压缩阈值取此值的 95%
-  compact_token: 0        # 显式指定压缩阈值(优先级高于 context_window), 0=自动
+  mention_only: false     # 全局触发默认值；主人可用 /ai mention on|off 分群覆盖
+  reply_probability: 0   # 主人可用 /ai probability 0到1 分群覆盖
+  context_window: 65536   # 未知模型上下文窗口(token)，执行预留输出空间，提前压缩
+  compact_token: 0        # 可降低自动压缩阈值；上限受实际请求预算约束，0=自动
   max_iterations: 200     # Agent 工具调用最大轮数
   tool_result_max: 3000   # 工具结果最大字符数(超出截断)
 
@@ -48,8 +49,8 @@ memory:
   embed_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 向量化 API
   embed_api_key: "YOUR_DASHSCOPE_API_KEY"
   embed_model: "text-embedding-v4"    # 向量模型
-  recall_limit: 5
-  vision_model: "qwen3.6-flash"       # 识图转述模型
+  recall_limit: 5                    # 当前用户与会话，最多20条/1800字；无向量服务时本地检索
+  vision_model: ""                   # 仅 ai.image_mode=caption 时填写可用的识图转述模型
 
 mood:
   enabled: true
@@ -117,6 +118,12 @@ plugin:
 group_request:
   enabled: true   # 入群申请管理(bot 是群管理时生效)
 
+community:
+  enabled: true           # 菜单、娱乐、分群与群管；无需配置 AI 模型
+  timezone: "Asia/Shanghai"
+  default_mode: "separate" # separate 分群 / global 全局共享；切换保留各套数据
+  transfer_fee_bps: 0     # 转账手续费，100=1%，最高1000=10%
+
 features:                 # 细粒度功能开关, 缺省(不写)均为开启
   quote: true           # 引用消息注入 + view_message 工具
   at_parse: true        # 收到的 @ 解析为 [@昵称(QQ)]
@@ -127,4 +134,4 @@ features:                 # 细粒度功能开关, 缺省(不写)均为开启
   silent_deny: true     # 群内无权限命令静默
   env_inject: true      # 群上下文注入[当前环境]
   group_meta: true      # 群 meta 信息 + get_member_info 工具
-  msg_timestamp: true   # 历史消息时间戳
+  msg_timestamp: true   # 独立的历史消息时间索引，不添加到助手回复正文

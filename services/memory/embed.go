@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -32,6 +34,10 @@ func NewEmbedder(cfg EmbeddingConfig) *Embedder {
 	return &Embedder{cfg: cfg, http: &http.Client{Timeout: time.Duration(timeout) * time.Second}}
 }
 
+func (e *Embedder) Configured() bool {
+	return strings.HasPrefix(e.cfg.BaseURL, "http") && e.cfg.Model != "" && e.cfg.APIKey != "" && !strings.HasPrefix(e.cfg.APIKey, "YOUR_")
+}
+
 // Embed 将文本向量化
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float64, error) {
 	req := struct {
@@ -52,9 +58,12 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float64, error) {
 		return nil, fmt.Errorf("embedding 请求: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embedding API 返回 %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("embedding API 返回 %d", resp.StatusCode)
 	}
 	var result struct {
 		Data []struct {
@@ -67,7 +76,21 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float64, error) {
 	if len(result.Data) == 0 {
 		return nil, fmt.Errorf("embedding 无结果")
 	}
-	return result.Data[0].Embedding, nil
+	vec := result.Data[0].Embedding
+	if len(vec) == 0 {
+		return nil, fmt.Errorf("embedding 返回空向量")
+	}
+	var norm float64
+	for _, v := range vec {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("embedding 返回非有限数")
+		}
+		norm += v * v
+	}
+	if norm == 0 || math.IsInf(norm, 0) {
+		return nil, fmt.Errorf("embedding 返回无效向量")
+	}
+	return vec, nil
 }
 
 // CosineSimilarity 余弦相似度
@@ -84,17 +107,9 @@ func CosineSimilarity(a, b []float64) float64 {
 	if na == 0 || nb == 0 {
 		return 0
 	}
-	return dot / (sqrt(na) * sqrt(nb))
-}
-
-func sqrt(x float64) float64 {
-	// 简单牛顿迭代平方根
-	if x == 0 {
+	score := dot / (math.Sqrt(na) * math.Sqrt(nb))
+	if math.IsNaN(score) || math.IsInf(score, 0) {
 		return 0
 	}
-	z := x
-	for i := 0; i < 30; i++ {
-		z = (z + x/z) / 2
-	}
-	return z
+	return math.Max(-1, math.Min(1, score))
 }

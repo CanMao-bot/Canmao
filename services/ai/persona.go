@@ -117,6 +117,9 @@ func (m *PersonaManager) selfImprove(ctx context.Context, recentConversation str
 		log.Printf("[persona] 自我优化失败: %v", err)
 		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// 解析 JSON
 	var result struct {
